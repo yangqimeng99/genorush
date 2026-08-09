@@ -47,12 +47,20 @@ pub fn load_name_dict(path: &std::path::Path) -> Result<HashMap<String, String>>
             continue;
         }
         let mut fields = line.split_whitespace();
-        let new_name = fields
-            .next()
-            .with_context(|| format!("name file line {}: expected 2 columns, got: {:?}", i + 1, line))?;
-        let old_name = fields
-            .next()
-            .with_context(|| format!("name file line {}: expected 2 columns, got: {:?}", i + 1, line))?;
+        let new_name = fields.next().with_context(|| {
+            format!(
+                "name file line {}: expected 2 columns, got: {:?}",
+                i + 1,
+                line
+            )
+        })?;
+        let old_name = fields.next().with_context(|| {
+            format!(
+                "name file line {}: expected 2 columns, got: {:?}",
+                i + 1,
+                line
+            )
+        })?;
         map.insert(old_name.to_string(), new_name.to_string());
     }
     Ok(map)
@@ -61,7 +69,10 @@ pub fn load_name_dict(path: &std::path::Path) -> Result<HashMap<String, String>>
 /// Streams `args.input` to `args.output`, applying `transform` to every line
 /// in parallel batches of `args.chunk_lines`. `transform` receives the
 /// trimmed line and the loaded name dictionary.
-pub fn run(args: &RenameCommonArgs, transform: impl Fn(&str, &HashMap<String, String>) -> String + Sync) -> Result<()> {
+pub fn run(
+    args: &RenameCommonArgs,
+    transform: impl Fn(&str, &HashMap<String, String>) -> String + Sync,
+) -> Result<()> {
     ensure!(args.chunk_lines > 0, "--chunk-lines must be > 0");
 
     let start = Instant::now();
@@ -69,7 +80,11 @@ pub fn run(args: &RenameCommonArgs, transform: impl Fn(&str, &HashMap<String, St
     let dict = load_name_dict(&args.name)?;
     log::info!("loaded {} name mappings", dict.len());
 
-    log::info!("processing {} -> {}", args.input.display(), args.output.display());
+    log::info!(
+        "processing {} -> {}",
+        args.input.display(),
+        args.output.display()
+    );
 
     let mut reader = open_reader(&args.input)?;
     let mut writer = open_writer(&args.output)?;
@@ -87,6 +102,10 @@ pub fn run(args: &RenameCommonArgs, transform: impl Fn(&str, &HashMap<String, St
     }
     writer.flush().context("failed to flush output")?;
 
-    log::info!("done: {} lines processed in {:.2?}", total_lines, start.elapsed());
+    log::info!(
+        "done: {} lines processed in {:.2?}",
+        total_lines,
+        start.elapsed()
+    );
     Ok(())
 }

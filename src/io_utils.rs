@@ -15,8 +15,8 @@ const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 /// (not `GzDecoder`) because bgzip-compressed genome references are valid
 /// concatenated multi-member gzip streams.
 pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
-    let mut file =
-        File::open(path).with_context(|| format!("failed to open input file: {}", path.display()))?;
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open input file: {}", path.display()))?;
 
     let mut magic = [0u8; 2];
     let read_n = file.read(&mut magic)?;
@@ -32,8 +32,8 @@ pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
 /// Opens `path` for writing. If the path ends in `.gz`, output is gzip
 /// compressed on the fly; otherwise it is written as plain text.
 pub fn open_writer(path: &Path) -> Result<Box<dyn Write>> {
-    let file =
-        File::create(path).with_context(|| format!("failed to create output file: {}", path.display()))?;
+    let file = File::create(path)
+        .with_context(|| format!("failed to create output file: {}", path.display()))?;
     let is_gz = path
         .extension()
         .and_then(|e| e.to_str())
@@ -41,7 +41,10 @@ pub fn open_writer(path: &Path) -> Result<Box<dyn Write>> {
         .unwrap_or(false);
 
     if is_gz {
-        Ok(Box::new(GzEncoder::new(BufWriter::new(file), Compression::default())))
+        Ok(Box::new(GzEncoder::new(
+            BufWriter::new(file),
+            Compression::default(),
+        )))
     } else {
         Ok(Box::new(BufWriter::new(file)))
     }
@@ -51,7 +54,11 @@ pub fn open_writer(path: &Path) -> Result<Box<dyn Write>> {
 /// leading/trailing whitespace from each line (mirrors Python's `str.strip()`
 /// semantics used by the original script). Returns the number of lines read;
 /// 0 means EOF.
-pub fn read_line_chunk(reader: &mut dyn BufRead, out: &mut Vec<String>, max_lines: usize) -> Result<usize> {
+pub fn read_line_chunk(
+    reader: &mut dyn BufRead,
+    out: &mut Vec<String>,
+    max_lines: usize,
+) -> Result<usize> {
     out.clear();
     let mut buf = String::new();
     let mut n_read = 0;

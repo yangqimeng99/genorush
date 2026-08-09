@@ -50,22 +50,34 @@ pub fn read_fastq_record(reader: &mut dyn BufRead, line_no: u64) -> Result<Optio
 
     let mut seq = String::new();
     if reader.read_line(&mut seq)? == 0 {
-        bail!("truncated FASTQ record at line {}: missing sequence line", line_no + 1);
+        bail!(
+            "truncated FASTQ record at line {}: missing sequence line",
+            line_no + 1
+        );
     }
     let seq = seq.trim_end_matches(['\n', '\r']).to_string();
 
     let mut plus = String::new();
     if reader.read_line(&mut plus)? == 0 {
-        bail!("truncated FASTQ record at line {}: missing '+' line", line_no + 2);
+        bail!(
+            "truncated FASTQ record at line {}: missing '+' line",
+            line_no + 2
+        );
     }
     let plus = plus.trim_end_matches(['\n', '\r']).to_string();
     if !plus.starts_with('+') {
-        bail!("malformed FASTQ at line {}: expected '+' line, got: {plus:?}", line_no + 2);
+        bail!(
+            "malformed FASTQ at line {}: expected '+' line, got: {plus:?}",
+            line_no + 2
+        );
     }
 
     let mut qual = String::new();
     if reader.read_line(&mut qual)? == 0 {
-        bail!("truncated FASTQ record at line {}: missing quality line", line_no + 3);
+        bail!(
+            "truncated FASTQ record at line {}: missing quality line",
+            line_no + 3
+        );
     }
     let qual = qual.trim_end_matches(['\n', '\r']).to_string();
 
@@ -79,7 +91,12 @@ pub fn read_fastq_record(reader: &mut dyn BufRead, line_no: u64) -> Result<Optio
         );
     }
 
-    Ok(Some(FastqRecord { header, seq, plus, qual }))
+    Ok(Some(FastqRecord {
+        header,
+        seq,
+        plus,
+        qual,
+    }))
 }
 
 #[cfg(test)]

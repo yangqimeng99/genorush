@@ -86,7 +86,10 @@ mod tests {
         let n = 200_000u64;
         let sum: f64 = (0..n).map(|i| deterministic_f64(seed, i)).sum();
         let mean = sum / n as f64;
-        assert!((0.48..0.52).contains(&mean), "sample mean {mean} looks biased");
+        assert!(
+            (0.48..0.52).contains(&mean),
+            "sample mean {mean} looks biased"
+        );
     }
 
     #[test]
@@ -99,7 +102,11 @@ mod tests {
             assert!(x < bound);
             seen.insert(x);
         }
-        assert_eq!(seen.len() as u64, bound, "did not observe all values in [0, bound)");
+        assert_eq!(
+            seen.len() as u64,
+            bound,
+            "did not observe all values in [0, bound)"
+        );
     }
 
     #[test]

@@ -126,20 +126,30 @@ pub fn run(args: SampleArgs) -> Result<()> {
         "must specify one of -p/--proportion or -n/--number"
     );
     if let Some(p) = args.proportion {
-        ensure!(p > 0.0 && p <= 1.0, "-p/--proportion must be in (0, 1], got {p}");
+        ensure!(
+            p > 0.0 && p <= 1.0,
+            "-p/--proportion must be in (0, 1], got {p}"
+        );
     }
     if let Some(n) = args.number {
         ensure!(n > 0, "-n/--number must be > 0");
     }
     ensure!(args.chunk_records > 0, "--chunk-records must be > 0");
     if args.in2.is_some() {
-        ensure!(args.out2.is_some(), "-O/--out2 is required when -I/--in2 is given");
+        ensure!(
+            args.out2.is_some(),
+            "-O/--out2 is required when -I/--in2 is given"
+        );
     }
 
     let seed = effective_seed(&args);
     log::info!(
         "random seed: {seed}{}",
-        if args.non_deterministic { " (time-based)" } else { "" }
+        if args.non_deterministic {
+            " (time-based)"
+        } else {
+            ""
+        }
     );
 
     match (&args.in2, &args.out2) {
@@ -203,7 +213,12 @@ fn run_proportion_se(
     Ok((total, kept))
 }
 
-fn run_reservoir_se(rx: &Receiver<Result<FastqRecord>>, writer: &mut dyn std::io::Write, seed: u64, n: u64) -> Result<(u64, u64)> {
+fn run_reservoir_se(
+    rx: &Receiver<Result<FastqRecord>>,
+    writer: &mut dyn std::io::Write,
+    seed: u64,
+    n: u64,
+) -> Result<(u64, u64)> {
     let n = n as usize;
     let mut rng = SplitMix64::new(seed);
     let mut reservoir: Vec<Option<(u64, FastqRecord)>> = vec![None; n];
@@ -263,7 +278,12 @@ fn recv_pair(
     }
 }
 
-fn run_pe(args: &SampleArgs, seed: u64, in2: &std::path::Path, out2: &std::path::Path) -> Result<()> {
+fn run_pe(
+    args: &SampleArgs,
+    seed: u64,
+    in2: &std::path::Path,
+    out2: &std::path::Path,
+) -> Result<()> {
     let start = Instant::now();
     log::info!(
         "sampling paired-end {} + {} -> {} + {}",
@@ -279,9 +299,26 @@ fn run_pe(args: &SampleArgs, seed: u64, in2: &std::path::Path, out2: &std::path:
     let check_ids = !args.no_pair_check;
 
     let (total, kept) = if let Some(p) = args.proportion {
-        run_proportion_pe(&rx1, &rx2, w1.as_mut(), w2.as_mut(), seed, p, args.chunk_records, check_ids)?
+        run_proportion_pe(
+            &rx1,
+            &rx2,
+            w1.as_mut(),
+            w2.as_mut(),
+            seed,
+            p,
+            args.chunk_records,
+            check_ids,
+        )?
     } else {
-        run_reservoir_pe(&rx1, &rx2, w1.as_mut(), w2.as_mut(), seed, args.number.unwrap(), check_ids)?
+        run_reservoir_pe(
+            &rx1,
+            &rx2,
+            w1.as_mut(),
+            w2.as_mut(),
+            seed,
+            args.number.unwrap(),
+            check_ids,
+        )?
     };
     w1.flush()?;
     w2.flush()?;
@@ -363,7 +400,8 @@ fn run_reservoir_pe(
         total += 1;
     }
 
-    let mut chosen: Vec<(u64, FastqRecord, FastqRecord)> = reservoir.into_iter().flatten().collect();
+    let mut chosen: Vec<(u64, FastqRecord, FastqRecord)> =
+        reservoir.into_iter().flatten().collect();
     chosen.sort_by_key(|(idx, _, _)| *idx);
     for (_, r1, r2) in &chosen {
         r1.write_to(w1)?;
