@@ -95,7 +95,11 @@ genorush fastx rescue -i R1.fq.gz -I R2.fq.gz -o R1.rescued.fq.gz -O R2.rescued.
   SplitMix64 随机数实现，既有用于并行抽样的无状态按序号取值版本，也有用于
   水库抽样这类顺序算法的有状态版本）。
 - `src/io_utils.rs` 提供所有命令共用的、能透明处理 gzip/bgzip 的读写接口——
-  读取时按文件头 magic bytes 判断，写入时按 `.gz` 扩展名判断。
+  读取时按文件头 magic bytes 判断，写入时按 `.gz` 扩展名判断。`BlockWriter`
+  是给分块处理的命令（`fastx sample`）用的批量写入器：把多个块并行压缩成
+  各自独立的 gzip member（`-j`/rayon 控制并行度，跟 `pigz` 用的多 member
+  技术是一回事）——标准 gzip 对单个流没法并行解压，但压缩本工具自己生成的
+  数据是可以并行的。
 - 每个命令的非平凡共用逻辑都配了单元测试（`cargo test`），并且
   `cargo clippy --all-targets` 无警告。
 - 每个命令完整的设计原理放在 `docs/en/`（英文）和 `docs/zh/`（中文，作者的

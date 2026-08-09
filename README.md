@@ -106,7 +106,12 @@ clean read (`0`) from a partial rescue (`3`) from nothing salvageable
   stateful variant for sequential algorithms like reservoir sampling).
 - `src/io_utils.rs` provides transparent gzip/bgzip-aware readers and
   writers used by every command — detect by magic bytes on read, by `.gz`
-  extension on write.
+  extension on write. `BlockWriter` is the batch-oriented writer used by
+  chunk-processing commands (`fastx sample`): it compresses multiple
+  blocks into independent gzip members in parallel via `-j`/rayon (the
+  same multi-member technique `pigz` uses), since standard gzip
+  decompression can't be parallelized for a single stream but compressing
+  data this tool generates itself can be.
 - Every command ships with unit tests for its non-trivial shared logic
   (`cargo test`) and is clippy-clean (`cargo clippy --all-targets`).
 - Full design rationale per command lives under `docs/en/` (English) and

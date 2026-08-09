@@ -117,9 +117,62 @@ overlaps I/O with the (cheap) sampling decision. In paired-end mode it's
 the difference between decompressing R1 then R2 sequentially (as two
 `seqkit sample` invocations would, back to back) and decompressing both
 concurrently on separate threads — gzip decompression is CPU-bound, so
-this is a genuine wall-clock win on multi-core machines, independent of
-whatever thread count `-j` gives to rayon for the proportion-sampling
-batches.
+this is a genuine wall-clock win on multi-core machines.
+
+This is also this design's hard ceiling on read-side parallelism: standard
+DEFLATE/gzip is not splittable across threads for a *single* stream (later
+bytes depend on back-references into earlier decompressed output), so one
+input file caps out at one core's decompression throughput no matter how
+large `-j` is. Two mate files means two such threads; that's the most
+concurrency available on the read side without requiring the input to
+already be in a block-splittable format (like bgzip) that ordinary
+SRA/sequencer `.fastq.gz` downloads generally aren't.
+
+## Parallel gzip output (`BlockWriter`)
+
+Where `-j` *does* scale close to linearly is the write side, and this was
+the actual bottleneck found in practice: an initial version streamed every
+kept record through one long-lived `flate2::write::GzEncoder`, so gzip
+*compression* — measurably more CPU-expensive per byte than decompression
+— ran on a single thread no matter what `-j` was set to. Real-world
+profiling on a 57+59 GB paired SRA dataset showed total CPU usage pinned
+at ~1.2 cores regardless of `-j 8`: two reader threads and one compressor
+thread that never ran concurrently, because the per-chunk loop drained the
+reader channels (blocking on decompression) and *then* compressed and
+wrote the result (blocking on compression) as two strictly alternating
+phases, each stalling the other's threads.
+
+`io_utils::BlockWriter` fixes the parallelism gap without touching the
+phase-alternation itself (a separate, larger restructuring that overlapping
+reader/writer stages would require) or adding any dependency: RFC 1952
+defines a gzip file as a concatenation of independently-decodable
+"members", so nothing stops compressing several chunks of output into
+separate members *in parallel* and writing the finished members to the
+file in order. This is exactly the technique `pigz` uses for its own
+compression speedup — and unlike genuine multi-core *decompression*
+(not really achievable for an arbitrary existing gzip stream, a limitation
+`pigz` itself documents), parallel *compression* of data this tool is
+generating itself is straightforward and needs nothing beyond the `flate2`
+dependency already in use plus `rayon`.
+
+Each chunk's selected records are split into `rayon::current_num_threads()`
+groups (`blocks_se`/`blocks_pe` in `sample.rs`), each formatted into a
+plain byte buffer, then handed to `BlockWriter::write_blocks`, which
+compresses every non-empty block into its own gzip member in parallel and
+writes the members to the file in the original order — so output is
+deterministic and byte-identical regardless of `-j`, only the internal
+member boundaries differ. Any conforming gzip reader, including this
+project's own `MultiGzDecoder`-based `open_reader`, decodes a multi-member
+stream exactly as if it were one; this was verified with `gzip -t`,
+`zcat`, and Python's `gzip` module directly. `--chunk-records` and `-j`
+together set the block granularity: a block that's too small pays a gzip
+member's small fixed overhead for little content, so very high `-j` on a
+low sampling proportion can shrink each block's real payload — `-j` should
+be set to genuinely available cores, not maximized blindly.
+
+Plain (non-gzip) output uses `BlockWriter`'s non-gzip branch, which just
+writes blocks sequentially — there's no compression cost to parallelize
+there, so no behavior changes for uncompressed output.
 
 ## Pairing correctness, made structural
 
@@ -178,3 +231,12 @@ paired input is rejected with a clear, specific error and process exit
 code 1. `common::rng` and `common::fastq` — the two modules every future
 record-oriented command will likely reuse — carry unit tests covering
 determinism, uniformity, and FASTQ structural-validation edge cases.
+
+`BlockWriter` was validated separately on a synthetic 1,000,000-pair /
+150 bp dataset (142 MB gzip per mate) at `-p 0.5` (a deliberately
+compression-heavy workload — half of everything decompressed gets
+recompressed): `-j 1` took 25.9s wall / 27.1s CPU-time (essentially one
+core, matching the pre-fix profile); `-j 8` took 6.3s wall / 33.8s
+CPU-time — a 4.1x wall-clock speedup, with `-j1` and `-j8` output verified
+byte-identical after decompression. This is the fix for the real-world
+57+59 GB SRA case that surfaced the original bottleneck.

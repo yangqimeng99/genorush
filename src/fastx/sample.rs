@@ -18,7 +18,6 @@
 //! twice, memory use here is O(n) in the sample size, not the input size,
 //! in a single pass.
 
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -29,7 +28,63 @@ use rayon::prelude::*;
 
 use crate::common::fastq::{recv_pair_step, spawn_reader, FastqRecord, PairStep};
 use crate::common::rng::{deterministic_f64, SplitMix64};
-use crate::io_utils::open_writer;
+use crate::io_utils::{open_block_writer, BlockWriter};
+
+/// Splits `records` into up to `rayon::current_num_threads()` byte blocks,
+/// each holding one sub-range's worth of formatted FASTQ text, so
+/// `BlockWriter::write_blocks` has independent units of work to
+/// gzip-compress in parallel. Splitting -- not the compression itself --
+/// happens sequentially here; it's cheap (no compression, just formatting)
+/// next to the compression work it sets up.
+fn blocks_se(records: &[&FastqRecord]) -> Result<Vec<Vec<u8>>> {
+    if records.is_empty() {
+        return Ok(vec![]);
+    }
+    let n = rayon::current_num_threads().max(1).min(records.len());
+    let chunk_size = records.len().div_ceil(n);
+    let mut blocks = Vec::with_capacity(n);
+    for group in records.chunks(chunk_size) {
+        let mut buf = Vec::new();
+        for r in group {
+            r.write_to(&mut buf)?;
+        }
+        blocks.push(buf);
+    }
+    Ok(blocks)
+}
+
+/// A pair of per-mate byte-block lists, aligned so index `i` in each holds
+/// the same read pairs.
+type PairedBlocks = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// Paired-end counterpart of `blocks_se`: `r1s`/`r2s` must be the same
+/// length and pair-aligned (index `i` in each is the same read pair).
+/// Produces matching R1/R2 block lists split along the same boundaries, so
+/// block `i` of the R1 output and block `i` of the R2 output always cover
+/// the same read pairs.
+fn blocks_pe(r1s: &[&FastqRecord], r2s: &[&FastqRecord]) -> Result<PairedBlocks> {
+    debug_assert_eq!(r1s.len(), r2s.len());
+    if r1s.is_empty() {
+        return Ok((vec![], vec![]));
+    }
+    let n = rayon::current_num_threads().max(1).min(r1s.len());
+    let chunk_size = r1s.len().div_ceil(n);
+    let mut blocks1 = Vec::with_capacity(n);
+    let mut blocks2 = Vec::with_capacity(n);
+    for (g1, g2) in r1s.chunks(chunk_size).zip(r2s.chunks(chunk_size)) {
+        let mut b1 = Vec::new();
+        let mut b2 = Vec::new();
+        for r in g1 {
+            r.write_to(&mut b1)?;
+        }
+        for r in g2 {
+            r.write_to(&mut b2)?;
+        }
+        blocks1.push(b1);
+        blocks2.push(b2);
+    }
+    Ok((blocks1, blocks2))
+}
 
 #[derive(Args, Debug)]
 pub struct SampleArgs {
@@ -133,12 +188,12 @@ fn run_se(args: &SampleArgs, seed: u64) -> Result<()> {
     let start = Instant::now();
     log::info!("sampling {} -> {}", args.in1.display(), args.out1.display());
     let rx = spawn_reader(args.in1.clone())?;
-    let mut writer = open_writer(&args.out1)?;
+    let mut writer = open_block_writer(&args.out1)?;
 
     let (total, kept) = if let Some(p) = args.proportion {
-        run_proportion_se(&rx, writer.as_mut(), seed, p, args.chunk_records)?
+        run_proportion_se(&rx, &mut writer, seed, p, args.chunk_records)?
     } else {
-        run_reservoir_se(&rx, writer.as_mut(), seed, args.number.unwrap())?
+        run_reservoir_se(&rx, &mut writer, seed, args.number.unwrap())?
     };
     writer.flush()?;
 
@@ -152,7 +207,7 @@ fn run_se(args: &SampleArgs, seed: u64) -> Result<()> {
 
 fn run_proportion_se(
     rx: &Receiver<Result<FastqRecord>>,
-    writer: &mut dyn std::io::Write,
+    writer: &mut BlockWriter,
     seed: u64,
     p: f64,
     chunk_size: usize,
@@ -175,18 +230,16 @@ fn run_proportion_se(
             .filter(|(i, _)| deterministic_f64(seed, base_idx + *i as u64) <= p)
             .map(|(_, r)| r)
             .collect();
-        for r in &selected {
-            r.write_to(writer)?;
-        }
         kept += selected.len() as u64;
         total += buf.len() as u64;
+        writer.write_blocks(blocks_se(&selected)?)?;
     }
     Ok((total, kept))
 }
 
 fn run_reservoir_se(
     rx: &Receiver<Result<FastqRecord>>,
-    writer: &mut dyn std::io::Write,
+    writer: &mut BlockWriter,
     seed: u64,
     n: u64,
 ) -> Result<(u64, u64)> {
@@ -211,10 +264,9 @@ fn run_reservoir_se(
 
     let mut chosen: Vec<(u64, FastqRecord)> = reservoir.into_iter().flatten().collect();
     chosen.sort_by_key(|(idx, _)| *idx);
-    for (_, rec) in &chosen {
-        rec.write_to(writer)?;
-    }
     let kept = chosen.len() as u64;
+    let refs: Vec<&FastqRecord> = chosen.iter().map(|(_, rec)| rec).collect();
+    writer.write_blocks(blocks_se(&refs)?)?;
     Ok((total, kept))
 }
 
@@ -264,16 +316,16 @@ fn run_pe(
     );
     let rx1 = spawn_reader(args.in1.clone())?;
     let rx2 = spawn_reader(in2.to_path_buf())?;
-    let mut w1 = open_writer(&args.out1)?;
-    let mut w2 = open_writer(out2)?;
+    let mut w1 = open_block_writer(&args.out1)?;
+    let mut w2 = open_block_writer(out2)?;
     let check_ids = !args.no_pair_check;
 
     let (total, kept) = if let Some(p) = args.proportion {
         run_proportion_pe(
             &rx1,
             &rx2,
-            w1.as_mut(),
-            w2.as_mut(),
+            &mut w1,
+            &mut w2,
             seed,
             p,
             args.chunk_records,
@@ -283,8 +335,8 @@ fn run_pe(
         run_reservoir_pe(
             &rx1,
             &rx2,
-            w1.as_mut(),
-            w2.as_mut(),
+            &mut w1,
+            &mut w2,
             seed,
             args.number.unwrap(),
             check_ids,
@@ -305,8 +357,8 @@ fn run_pe(
 fn run_proportion_pe(
     rx1: &Receiver<Result<FastqRecord>>,
     rx2: &Receiver<Result<FastqRecord>>,
-    w1: &mut dyn std::io::Write,
-    w2: &mut dyn std::io::Write,
+    w1: &mut BlockWriter,
+    w2: &mut BlockWriter,
     seed: u64,
     p: f64,
     chunk_size: usize,
@@ -333,21 +385,23 @@ fn run_proportion_pe(
             .filter(|(i, _)| deterministic_f64(seed, base_idx + *i as u64) <= p)
             .map(|(_, pair)| pair)
             .collect();
-        for (r1, r2) in &selected {
-            r1.write_to(w1)?;
-            r2.write_to(w2)?;
-        }
         kept += selected.len() as u64;
         total += buf.len() as u64;
+        let r1s: Vec<&FastqRecord> = selected.iter().map(|pair| &pair.0).collect();
+        let r2s: Vec<&FastqRecord> = selected.iter().map(|pair| &pair.1).collect();
+        let (b1, b2) = blocks_pe(&r1s, &r2s)?;
+        w1.write_blocks(b1)?;
+        w2.write_blocks(b2)?;
     }
     Ok((total, kept))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_reservoir_pe(
     rx1: &Receiver<Result<FastqRecord>>,
     rx2: &Receiver<Result<FastqRecord>>,
-    w1: &mut dyn std::io::Write,
-    w2: &mut dyn std::io::Write,
+    w1: &mut BlockWriter,
+    w2: &mut BlockWriter,
     seed: u64,
     n: u64,
     check_ids: bool,
@@ -373,10 +427,11 @@ fn run_reservoir_pe(
     let mut chosen: Vec<(u64, FastqRecord, FastqRecord)> =
         reservoir.into_iter().flatten().collect();
     chosen.sort_by_key(|(idx, _, _)| *idx);
-    for (_, r1, r2) in &chosen {
-        r1.write_to(w1)?;
-        r2.write_to(w2)?;
-    }
     let kept = chosen.len() as u64;
+    let r1s: Vec<&FastqRecord> = chosen.iter().map(|(_, r1, _)| r1).collect();
+    let r2s: Vec<&FastqRecord> = chosen.iter().map(|(_, _, r2)| r2).collect();
+    let (b1, b2) = blocks_pe(&r1s, &r2s)?;
+    w1.write_blocks(b1)?;
+    w2.write_blocks(b2)?;
     Ok((total, kept))
 }
