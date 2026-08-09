@@ -118,6 +118,10 @@ clean read (`0`) from a partial rescue (`3`) from nothing salvageable
   `docs/zh/` (Chinese, primary author's working language) — read those
   before extending a command, they document *why*, not just *what*.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

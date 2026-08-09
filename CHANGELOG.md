@@ -1,0 +1,74 @@
+# Changelog
+
+All notable changes to this project are documented here. Format loosely
+follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [0.2.0] - 2026-08-09
+
+### Added
+
+- `fastx rescue`: recovers the leading run of clean, well-formed FASTQ
+  records (or read pairs) from a truncated/corrupted file, e.g. an
+  interrupted download. Stops cleanly at the first read error, R1/R2
+  count mismatch, or ID mismatch instead of erroring out, and reports
+  the outcome via exit code (`0` = fully clean, `3` = partial rescue,
+  `1` = nothing salvageable). See `docs/en/rescue.md` /
+  `docs/zh/rescue.md`.
+- `CONTRIBUTORS.md`.
+
+### Changed
+
+- **`-j/--threads` now defaults to `1`** instead of all logical cores,
+  so parallelism is opt-in (`-j 0` for all cores, or `-j N`).
+- **`fastx sample` gzip output is now compressed in parallel**
+  (`io_utils::BlockWriter`, a multi-member gzip writer in the same
+  spirit as `pigz`), scaling with `-j`. Fixes a real-world case where
+  `-j` had no measurable effect on a 57+59 GB paired FASTQ dataset —
+  root cause was single-threaded output compression alternating with
+  (non-overlapping) input decompression as two non-concurrent phases.
+  Benchmarked at a 4.1x wall-clock speedup (`-j 8` vs `-j 1`) on a
+  compression-heavy synthetic workload; output is byte-identical
+  regardless of thread count. See `docs/en/sample.md` /
+  `docs/zh/sample.md` for the full writeup.
+- `fastx sample`'s concurrent-mate-reading and pairing logic
+  (`spawn_reader`, `PairStep`/`recv_pair_step`) moved into
+  `common::fastq` so `fastx rescue` can reuse the same mechanism with
+  the opposite error-handling policy (bail-on-desync vs.
+  stop-and-keep-what-you-have).
+- Project description broadened from "genomics/transcriptomics" to
+  "bioinformatics" throughout `Cargo.toml`, `README.md`/`README.zh.md`,
+  and `main.rs` — this is a general-purpose toolkit, not limited to
+  those two subfields.
+- Release workflow no longer builds a glibc Linux target: it links
+  against the build runner's glibc version and fails to run on older
+  systems with `GLIBC_2.XX not found`. Only the fully static `musl`
+  build (verified with `ldd`: "statically linked") is shipped for
+  Linux now — four platforms per release, not five.
+
+### Fixed
+
+- Release workflow's default `GITHUB_TOKEN` lacked `contents: write`
+  permission, so the first tagged release build's asset-upload step
+  failed with a 403 on every platform even though all five builds
+  (including the since-removed glibc target) had already succeeded.
+
+## [0.1.0] - 2026-08-09
+
+Initial release.
+
+### Added
+
+- `fastx rename` / `gff rename`: reimplements
+  [`ChangeChrNameInFaOrGff.py`](https://github.com/yangqimeng99/svlearn-paper-code/blob/main/scripts/ChangeChrNameInFaOrGff.py)
+  from the SVLearn paper-code repository, verified byte-identical
+  against the original script on FASTA/GFF test cases, with native
+  gzip/bgzip support (by content, not extension) and rayon-parallel
+  chunked line processing.
+- `fastx sample`: FASTQ downsampling by proportion (parallel,
+  deterministic SplitMix64-hash-based decisions) or exact count
+  (single-pass reservoir sampling, O(k) memory). Paired-end R1/R2 are
+  sampled together in one process with structural pairing guarantees
+  (matching read counts, matching IDs), instead of relying on two
+  separate same-seed `seqkit sample`-style invocations.
+- CI (fmt/clippy/build/test across Linux/macOS/Windows) and a
+  cross-platform release workflow.

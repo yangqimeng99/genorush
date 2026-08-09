@@ -106,6 +106,10 @@ genorush fastx rescue -i R1.fq.gz -I R2.fq.gz -o R1.rescued.fq.gz -O R2.rescued.
   主要工作语言）下——在扩展某个命令之前建议先读一下，那里记录的是"为什么这样
   设计"，而不只是"这段代码做了什么"。
 
+## 更新日志
+
+见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## License
 
 MIT，见 [LICENSE](LICENSE)。
