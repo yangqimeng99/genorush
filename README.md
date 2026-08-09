@@ -12,7 +12,7 @@ planned under new categories (`vcf`, `sv`, ...) as needs come up.
 
 ## Install
 
-Prebuilt binaries for Linux (glibc and static musl), macOS (Intel and
+Prebuilt binaries for Linux (static musl, works on any distro/glibc version), macOS (Intel and
 Apple Silicon), and Windows are attached to
 [GitHub Releases](https://github.com/yangqimeng99/genorush/releases).
 Download the archive for your platform, extract, and put `genorush` (or

@@ -20,10 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux-x86_64-gnu
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: tar.gz
+          # glibc build intentionally omitted: it links against the build
+          # runner's glibc version, which breaks on older Linux systems with
+          # an older glibc ("GLIBC_2.XX not found"). The musl target below is
+          # fully static and has no such constraint, so it's the only Linux
+          # binary shipped.
           - name: linux-x86_64-musl
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
