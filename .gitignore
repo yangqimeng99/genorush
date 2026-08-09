@@ -2,3 +2,7 @@
 *.log
 .DS_Store
 *.swp
+
+# Local session-handoff notes (machine-specific, includes a Claude Code
+# session ID) -- never meant to be shared or published.
+/NOTES.md
