@@ -29,10 +29,12 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             archive: tar.gz
-          - name: macos-x86_64
-            os: macos-13
-            target: x86_64-apple-darwin
-            archive: tar.gz
+          # macos-x86_64 (Intel, `macos-13` runner) intentionally omitted:
+          # GitHub's shared macos-13 runner pool has repeatedly queued this
+          # specific job for 5+ minutes while every other platform (including
+          # macos-latest/arm64) starts within seconds, on two consecutive
+          # releases. Re-add it if that improves, or if Intel Mac support is
+          # specifically requested.
           - name: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin

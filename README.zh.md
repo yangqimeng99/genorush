@@ -11,7 +11,7 @@
 
 ## 安装
 
-Linux（静态 musl 版，不挑发行版/glibc 版本）、macOS（Intel 和 Apple Silicon）、Windows 的
+Linux（静态 musl 版，不挑发行版/glibc 版本）、macOS（Apple Silicon）、Windows 的
 预编译二进制会挂在
 [GitHub Releases](https://github.com/yangqimeng99/genorush/releases) 页面。
 下载对应平台的压缩包，解压后把 `genorush`（Windows 上是 `genorush.exe`）放进

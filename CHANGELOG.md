@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Release workflow no longer builds `macos-x86_64` (Intel, the `macos-13`
+  runner): GitHub's shared runner pool for that specific image queued the
+  job for 5+ minutes on two consecutive releases while every other
+  platform (including `macos-latest`/arm64) started within seconds. Only
+  Apple Silicon macOS binaries are published now; the v0.2.0 release may
+  still end up with a bonus Intel build if that already-queued job
+  eventually completes, but future releases won't wait on it.
+
 ## [0.2.0] - 2026-08-09
 
 ### Added
