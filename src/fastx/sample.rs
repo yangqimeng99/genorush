@@ -20,17 +20,16 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use std::sync::mpsc::Receiver;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Result};
 use clap::Args;
 use rayon::prelude::*;
 
-use crate::common::fastq::{read_fastq_record, FastqRecord};
+use crate::common::fastq::{recv_pair_step, spawn_reader, FastqRecord, PairStep};
 use crate::common::rng::{deterministic_f64, SplitMix64};
-use crate::io_utils::{open_reader, open_writer};
+use crate::io_utils::open_writer;
 
 #[derive(Args, Debug)]
 pub struct SampleArgs {
@@ -90,34 +89,6 @@ fn effective_seed(args: &SampleArgs) -> u64 {
     } else {
         args.seed
     }
-}
-
-/// Spawns a background thread that decompresses and parses `path`, streaming
-/// parsed records out through a bounded channel. Running this on its own
-/// thread is what lets R1 and R2 decompress concurrently in paired-end mode
-/// instead of sequentially, as two separate `seqkit sample` invocations would.
-fn spawn_reader(path: PathBuf) -> Result<Receiver<Result<FastqRecord>>> {
-    let mut reader = open_reader(&path)?;
-    let (tx, rx) = mpsc::sync_channel::<Result<FastqRecord>>(4096);
-    thread::spawn(move || {
-        let mut line_no: u64 = 1;
-        loop {
-            match read_fastq_record(reader.as_mut(), line_no) {
-                Ok(Some(rec)) => {
-                    line_no += 4;
-                    if tx.send(Ok(rec)).is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                    break;
-                }
-            }
-        }
-    });
-    Ok(rx)
 }
 
 pub fn run(args: SampleArgs) -> Result<()> {
@@ -256,12 +227,9 @@ fn recv_pair(
     idx: u64,
     check_ids: bool,
 ) -> Result<Option<(FastqRecord, FastqRecord)>> {
-    match (rx1.recv(), rx2.recv()) {
-        (Err(_), Err(_)) => Ok(None),
-        (Ok(r1), Ok(r2)) => {
-            let r1 = r1?;
-            let r2 = r2?;
-            if check_ids && r1.base_id() != r2.base_id() {
+    match recv_pair_step(rx1, rx2) {
+        PairStep::Pair { r1, r2, ids_match } => {
+            if check_ids && !ids_match {
                 bail!(
                     "read 1/2 desync at pair #{idx}: IDs {:?} vs {:?} do not match; \
                      files are not properly paired (pass --no-pair-check to override)",
@@ -271,10 +239,12 @@ fn recv_pair(
             }
             Ok(Some((r1, r2)))
         }
-        _ => bail!(
+        PairStep::Eof => Ok(None),
+        PairStep::CountMismatch => bail!(
             "read 1/2 have different numbers of reads (mismatch detected at pair #{idx}); \
              files are not properly paired"
         ),
+        PairStep::ReadError(e) => Err(e),
     }
 }
 

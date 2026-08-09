@@ -2,11 +2,11 @@
 
 [English](README.md)
 
-一个用 Rust 写的、高性能、原生多线程、跨平台开箱即用的基因组学/转录组学命令行
-工具集。设计精神上参考 [seqkit](https://github.com/shenwei356/seqkit)：单个
-静态二进制文件，一个命令做一件事，无运行时依赖。
+一个用 Rust 写的、高性能、原生多线程、跨平台开箱即用的生物信息学命令行工具集。
+设计精神上参考 [seqkit](https://github.com/shenwei356/seqkit)：单个静态二进制
+文件，一个命令做一件事，无运行时依赖。
 
-当前状态：早期阶段，持续开发中。目前有两个命令，未来会在新的类别下
+当前状态：早期阶段，持续开发中。目前有几个命令，未来会在新的类别下
 （`vcf`、`sv` 等）按实际需求陆续添加。
 
 ## 安装
@@ -37,8 +37,9 @@ genorush <类别> <动作> [选项]
 | `fastx`   | `rename`   | 通过映射表重命名 FASTA 文件里的序列名 |
 | `gff`     | `rename`   | 通过映射表重命名 GFF/GTF 文件的 seqid 列 |
 | `fastx`   | `sample`   | 按比例或精确条数对 FASTQ reads 下采样，支持单端/双端 |
+| `fastx`   | `rescue`   | 从损坏/截断的 FASTQ 里拯救出开头那段完好的 reads，支持单端/双端 |
 
-所有子命令都支持全局参数 `-j/--threads`（`0` 表示使用全部逻辑核心）。
+所有子命令都支持全局参数 `-j/--threads`（默认 `1`；传 `0` 表示使用全部逻辑核心）。
 
 ### `fastx rename` / `gff rename`
 
@@ -68,13 +69,29 @@ genorush fastx sample -i R1.fq.gz -I R2.fq.gz -o R1.sub.fq.gz -O R2.sub.fq.gz -p
 [`docs/zh/sample.md`](docs/zh/sample.md)（确定性并行比例抽样、精确条数的单遍
 水库抽样，以及为什么这两种方式比朴素做法更好）。
 
+### `fastx rescue`
+
+```bash
+# 单端：从损坏/中断的下载里拯救出完好的 reads
+genorush fastx rescue -i reads.fq.gz -o rescued.fq.gz
+
+# 双端：只拯救两个 mate 都完好且能对上的那些配对
+genorush fastx rescue -i R1.fq.gz -I R2.fq.gz -o R1.rescued.fq.gz -O R2.rescued.fq.gz
+```
+
+针对下载中断这种场景：损坏点之前解压出来的内容都是完好的数据，这个命令精确地
+把这部分拯救出来，遇到问题就干净地停下而不是直接报错。退出码能区分"完全干净"
+（`0`）、"部分拯救"（`3`）、"什么都保不住"（`1`）三种情况，方便写进脚本里做
+判断。完整设计说明见 [`docs/zh/rescue.md`](docs/zh/rescue.md)。
+
 ## 给贡献者（不管是人还是 AI）的设计说明
 
 - `src/main.rs` 搭了一棵两级的 `clap` 命令树：`genorush <类别> <动作>`。每个
   类别（`fastx/`、`gff/` ……）是一个模块，`mod.rs` 里持有一个 `Subcommand`
   枚举和一个 `run()` 分发函数；每个动作单独一个文件。
 - `src/common/` 放跨类别共用的逻辑：`rename.rs`（分块并行的逐行转换引擎）、
-  `fastq.rs`（一个精简的 FASTQ 记录模型）、`rng.rs`（一个无外部依赖的
+  `fastq.rs`（一个精简的 FASTQ 记录模型，外加 `sample`/`rescue` 共用的
+  并发读取 mate 文件、逐对比对的基础设施）、`rng.rs`（一个无外部依赖的
   SplitMix64 随机数实现，既有用于并行抽样的无状态按序号取值版本，也有用于
   水库抽样这类顺序算法的有状态版本）。
 - `src/io_utils.rs` 提供所有命令共用的、能透明处理 gzip/bgzip 的读写接口——

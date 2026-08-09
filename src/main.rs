@@ -6,12 +6,12 @@ mod io_utils;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-/// GenoRush - a fast, parallel, cross-platform CLI toolkit for genomics/transcriptomics data
+/// GenoRush - a fast, parallel, cross-platform CLI toolkit for bioinformatics data
 #[derive(Parser, Debug)]
 #[command(name = "genorush", version, propagate_version = true)]
 struct Cli {
-    /// Worker threads for parallel processing (0 = use all logical cores)
-    #[arg(short = 'j', long, global = true, default_value_t = 0)]
+    /// Worker threads for parallel processing (default: 1; pass 0 to use all logical cores)
+    #[arg(short = 'j', long, global = true, default_value_t = 1)]
     threads: usize,
 
     #[command(subcommand)]
