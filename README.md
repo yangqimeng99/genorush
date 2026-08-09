@@ -92,7 +92,7 @@ clean read (`0`) from a partial rescue (`3`) from nothing salvageable
 (`1`), so it composes into scripts. See
 [`docs/en/rescue.md`](docs/en/rescue.md) for the full design writeup.
 
-## Design notes for contributors (human or AI)
+## Design notes for contributors
 
 - `src/main.rs` wires a two-level `clap` command tree:
   `genorush <category> <action>`. Each category (`fastx/`, `gff/`, ...) is

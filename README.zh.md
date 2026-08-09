@@ -84,7 +84,7 @@ genorush fastx rescue -i R1.fq.gz -I R2.fq.gz -o R1.rescued.fq.gz -O R2.rescued.
 （`0`）、"部分拯救"（`3`）、"什么都保不住"（`1`）三种情况，方便写进脚本里做
 判断。完整设计说明见 [`docs/zh/rescue.md`](docs/zh/rescue.md)。
 
-## 给贡献者（不管是人还是 AI）的设计说明
+## 给贡献者的设计说明
 
 - `src/main.rs` 搭了一棵两级的 `clap` 命令树：`genorush <类别> <动作>`。每个
   类别（`fastx/`、`gff/` ……）是一个模块，`mod.rs` 里持有一个 `Subcommand`
