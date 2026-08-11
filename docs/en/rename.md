@@ -109,6 +109,23 @@ chunks keep rayon's per-task overhead negligible relative to per-line work.
 size once at startup; `0` (the default) means "use all logical cores",
 which is rayon's own default behavior.
 
+### Parallel gzip output too
+
+The above parallelizes the *transform* — computing each output line's
+content. Writing that output, when the destination ends in `.gz`, is a
+separate concern with its own single-threaded bottleneck if left
+unaddressed: this was discovered the hard way in `fastx sample` (see
+`docs/en/sample.md`'s `BlockWriter` section for the full story — a
+57+59 GB real-world dataset where `-j` measurably did nothing, because
+compression ran on one thread no matter the thread count). `common::rename::run`
+was migrated to `io_utils::BlockWriter` for the same reason: each
+transformed chunk's lines are split into `rayon::current_num_threads()`
+groups (`lines_into_blocks`, `common/rename.rs`) and compressed into
+independent gzip members in parallel, rather than streamed through one
+long-lived `GzEncoder`. For plain-text output this changes nothing (no
+compression to parallelize); for gzip output on a large reference genome,
+`-j` now does real work on the write side, not just the transform side.
+
 ## Measured results
 
 Validated against the real Python script (not a re-derivation of its logic —

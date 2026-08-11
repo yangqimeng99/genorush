@@ -40,6 +40,30 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Apple Silicon macOS binaries are published now; the v0.2.0 release may
   still end up with a bonus Intel build if that already-queued job
   eventually completes, but future releases won't wait on it.
+- **`fastx rename`/`gff rename`/`fastx rescue` gzip output is now
+  compressed in parallel** via `io_utils::BlockWriter`, closing the same
+  single-threaded-compression gap found and fixed in `fastx sample`
+  (v0.2.0) but never propagated to these three pre-existing commands --
+  `-j` previously had no effect on their write side at all. `rescue` also
+  gained `--chunk-records` (buffers confirmed-good records in batches
+  instead of writing one at a time) as part of this migration, and no
+  longer needs the explicit `drop(writer)` workaround for the
+  `std::process::exit`-skips-destructors hazard documented in
+  `docs/en/rescue.md` -- `BlockWriter` finishes each gzip member
+  synchronously within `write_blocks` rather than deferring to `Drop`, so
+  the hazard doesn't apply to it.
+- **`fastx deinterleave` now reads via `common::fastq::spawn_reader`**
+  (a background thread decompressing/parsing into a channel) instead of
+  `io_utils::open_reader` directly, matching every other multi-file
+  command. For `split_interleaved`/`split_concat` this is a real fix: the
+  reader thread now keeps decompressing the next chunk while the current
+  chunk's parallel compression runs, instead of the main thread sitting
+  idle during compression. For `detect_layout`/`count_records` it's
+  mainly a consistency/code-simplification change -- those two functions
+  do so little non-reading work that the wall-clock benefit is negligible,
+  since decompression was already the sole bottleneck either way.
+- `io_utils::open_writer`/`write_lines` removed (dead code once the above
+  three commands migrated off them).
 
 ## [0.2.0] - 2026-08-09
 

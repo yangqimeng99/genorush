@@ -30,27 +30,6 @@ pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
     }
 }
 
-/// Opens `path` for writing. If the path ends in `.gz`, output is gzip
-/// compressed on the fly; otherwise it is written as plain text.
-pub fn open_writer(path: &Path) -> Result<Box<dyn Write>> {
-    let file = File::create(path)
-        .with_context(|| format!("failed to create output file: {}", path.display()))?;
-    let is_gz = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("gz"))
-        .unwrap_or(false);
-
-    if is_gz {
-        Ok(Box::new(GzEncoder::new(
-            BufWriter::new(file),
-            Compression::default(),
-        )))
-    } else {
-        Ok(Box::new(BufWriter::new(file)))
-    }
-}
-
 /// Reads at most `max_lines` lines from `reader` into `out`, trimming
 /// leading/trailing whitespace from each line (mirrors Python's `str.strip()`
 /// semantics used by the original script). Returns the number of lines read;
@@ -73,14 +52,6 @@ pub fn read_line_chunk(
         n_read += 1;
     }
     Ok(n_read)
-}
-
-pub fn write_lines(writer: &mut dyn Write, lines: &[String]) -> io::Result<()> {
-    for line in lines {
-        writer.write_all(line.as_bytes())?;
-        writer.write_all(b"\n")?;
-    }
-    Ok(())
 }
 
 /// A writer for commands that already buffer output in batches and want

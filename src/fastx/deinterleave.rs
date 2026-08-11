@@ -20,6 +20,21 @@
 //! layout -- `interleaved` needs only a single streaming pass with no
 //! extra memory; `concat` still needs the record count up front (a
 //! count-only pass, cheaper than full detection since it skips hashing).
+//!
+//! Every read here goes through `common::fastq::spawn_reader` rather than
+//! `io_utils::open_reader` directly, even though there's only ever one
+//! input file (no second mate to decompress concurrently with). The reason
+//! is `split_interleaved`/`split_concat`, not detection: while those
+//! functions dispatch a chunk's worth of records to the parallel-compressing
+//! `BlockWriter`, the reader thread keeps decompressing/parsing the *next*
+//! chunk into its channel buffer in the background instead of the main
+//! thread sitting idle waiting for compression to finish -- the same
+//! overlap `fastx sample`/`fastx cat` already get from reading two mates
+//! concurrently, available here even for a single file. (`detect_layout`/
+//! `count_records` also use it, for consistency and because it lets go of
+//! manual `line_no` bookkeeping, but since those two functions do almost no
+//! work besides reading, the wall-clock benefit there is close to zero --
+//! decompression is already the sole bottleneck either way.)
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -27,9 +42,9 @@ use std::time::Instant;
 use anyhow::{bail, ensure, Result};
 use clap::{Args, ValueEnum};
 
-use crate::common::fastq::{format_into_blocks, read_fastq_record, FastqRecord};
+use crate::common::fastq::{format_into_blocks, spawn_reader, FastqRecord};
 use crate::common::hash::fnv1a;
-use crate::io_utils::{open_block_writer, open_reader, BlockWriter};
+use crate::io_utils::{open_block_writer, BlockWriter};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Layout {
@@ -72,12 +87,10 @@ enum DetectedLayout {
 /// both layout hypotheses against those hashes. Returns the layout and the
 /// total record count (needed by the concat split, computed here for free).
 fn detect_layout(path: &Path) -> Result<(DetectedLayout, usize)> {
-    let mut reader = open_reader(path)?;
+    let rx = spawn_reader(path.to_path_buf())?;
     let mut hashes: Vec<u64> = Vec::new();
-    let mut line_no: u64 = 1;
-    while let Some(rec) = read_fastq_record(reader.as_mut(), line_no)? {
-        hashes.push(fnv1a(rec.base_id().as_bytes()));
-        line_no += 4;
+    for r in rx.iter() {
+        hashes.push(fnv1a(r?.base_id().as_bytes()));
     }
 
     let n = hashes.len();
@@ -117,12 +130,11 @@ fn detect_layout(path: &Path) -> Result<(DetectedLayout, usize)> {
 /// explicitly, which still needs the midpoint but not the (unnecessary)
 /// hypothesis test detection would otherwise do.
 fn count_records(path: &Path) -> Result<usize> {
-    let mut reader = open_reader(path)?;
+    let rx = spawn_reader(path.to_path_buf())?;
     let mut n = 0usize;
-    let mut line_no: u64 = 1;
-    while read_fastq_record(reader.as_mut(), line_no)?.is_some() {
+    for r in rx.iter() {
+        r?;
         n += 1;
-        line_no += 4;
     }
     Ok(n)
 }
@@ -136,20 +148,13 @@ fn split_interleaved(
     w2: &mut BlockWriter,
     chunk_records: usize,
 ) -> Result<u64> {
-    let mut reader = open_reader(input)?;
+    let rx = spawn_reader(input.to_path_buf())?;
     let mut chunk: Vec<FastqRecord> = Vec::with_capacity(chunk_records);
-    let mut line_no: u64 = 1;
     let mut total: u64 = 0;
     loop {
         chunk.clear();
-        for _ in 0..chunk_records {
-            match read_fastq_record(reader.as_mut(), line_no)? {
-                Some(rec) => {
-                    chunk.push(rec);
-                    line_no += 4;
-                }
-                None => break,
-            }
+        for r in rx.iter().take(chunk_records) {
+            chunk.push(r?);
         }
         if chunk.is_empty() {
             break;
@@ -189,20 +194,13 @@ fn split_concat(
         "input has an odd number of records ({n}); a merged paired-end file must have an even count"
     );
     let half = n / 2;
-    let mut reader = open_reader(input)?;
+    let rx = spawn_reader(input.to_path_buf())?;
     let mut chunk: Vec<FastqRecord> = Vec::with_capacity(chunk_records);
-    let mut line_no: u64 = 1;
     let mut total: usize = 0;
     loop {
         chunk.clear();
-        for _ in 0..chunk_records {
-            match read_fastq_record(reader.as_mut(), line_no)? {
-                Some(rec) => {
-                    chunk.push(rec);
-                    line_no += 4;
-                }
-                None => break,
-            }
+        for r in rx.iter().take(chunk_records) {
+            chunk.push(r?);
         }
         if chunk.is_empty() {
             break;

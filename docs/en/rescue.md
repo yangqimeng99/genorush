@@ -102,26 +102,40 @@ This makes `if genorush fastx rescue ...; then ... elif [ $? -eq 3 ]; then
 echo "partial, check logs"; else echo "unusable"; fi` a meaningful pattern
 in a pipeline script.
 
-### A subtlety: `std::process::exit` skips destructors
+### A subtlety: `std::process::exit` skips destructors (and how `BlockWriter` sidesteps it)
 
 `finish()` in `rescue.rs` calls `std::process::exit(code)` directly for the
 1/3 cases, since Rust's normal `main() -> Result<()>` exit-code convention
 only distinguishes 0 from 1. `std::process::exit` terminates the process
-immediately *without running destructors* — which matters a great deal
-here, because `io_utils::open_writer`'s gzip path (`flate2::write::GzEncoder`)
-writes its trailer (CRC32 + uncompressed size) in its `Drop` implementation,
-not on `flush()`. Calling `process::exit` while a `GzEncoder` is still
-alive produces a `.gz` file with a valid header and body but a missing/
-incomplete trailer — which every gzip reader correctly rejects as
-truncated. `run_se`/`run_pe` therefore call `writer.flush()` and then
-explicitly `drop(writer)` (or `drop(w1); drop(w2);`) *before* calling
-`finish()`, forcing the encoder's trailer to be written while normal Rust
-scope-based destruction is still in effect. This was caught by testing,
-not designed in up front: a first version produced an output `.gz` that
-`gzip -t` rejected, even though the rescued *content* was byte-for-byte
-correct — worth remembering for any future command that mixes a
-possibly-early-exiting code path with a `Box<dyn Write>` wrapping a
-compressor.
+immediately *without running destructors* — and the first version of this
+command hit exactly the failure mode that matters here: it wrote through
+`io_utils::open_writer`, whose gzip path was a single long-lived
+`flate2::write::GzEncoder` that writes its trailer (CRC32 + uncompressed
+size) in `Drop`, not on `flush()`. Calling `process::exit` while that
+`GzEncoder` was still alive produced a `.gz` file with a valid header and
+body but a missing trailer — rejected as truncated by every gzip reader,
+even though the rescued *content* was byte-for-byte correct. The fix at
+the time was an explicit `drop(writer)` before `finish()`, forcing the
+trailer to be written while normal scope-based destruction was still in effect.
+
+That workaround is gone now, not because the underlying hazard was patched
+around again, but because it doesn't apply to the type in use anymore.
+`rescue` was migrated to `io_utils::BlockWriter` (see `docs/en/sample.md`
+for why it exists) to get parallel-compressed output the same as every
+other chunk-processing command — confirmed-good records are buffered in
+`--chunk-records`-sized batches and handed to `write_blocks`, flushing
+whatever partial batch is left over the moment corruption is hit or the
+input ends. `BlockWriter`'s gzip path creates a *fresh* `GzEncoder`
+per block and calls `.finish()` on it synchronously, inside the same
+`write_blocks` call that produced it — so every gzip member is fully
+complete, trailer included, the instant `write_blocks` returns. There is
+no persistent, Drop-dependent encoder state to lose to `process::exit`
+anymore; `writer.flush()` (still called before `finish()`) only has to push
+the underlying `BufWriter`'s buffered bytes to the OS, which is a
+straightforward, non-hazardous flush. Worth remembering the general lesson
+anyway — mixing a possibly-early-exiting code path with anything that
+defers meaningful work to `Drop` is a trap — even though this specific
+instance of it happens to no longer exist in this codebase.
 
 ## Limitations
 

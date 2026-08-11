@@ -16,6 +16,14 @@
 //! ends" -- it stops there, keeps everything decoded up to that point, and
 //! reports what it recovered instead of aborting.
 //!
+//! Confirmed-good records are buffered in `--chunk-records`-sized batches
+//! and handed to the parallel-compressing `BlockWriter` (`io_utils`,
+//! `common::fastq::format_into_blocks`) exactly like `fastx sample`/`fastx
+//! cat` -- rescue just also flushes whatever partial batch is left over
+//! the moment corruption is hit or the input ends, since that data needs
+//! to make it to disk regardless of where it fell relative to a chunk
+//! boundary.
+//!
 //! This only catches *structural* corruption (truncation, bad gzip, a
 //! header/plus-line/seq-qual-length violation). Bit-level corruption that
 //! leaves a record structurally well-formed but with wrong sequence/quality
@@ -27,8 +35,10 @@ use std::time::Instant;
 use anyhow::{ensure, Result};
 use clap::Args;
 
-use crate::common::fastq::{recv_pair_step, spawn_reader, PairStep};
-use crate::io_utils::open_writer;
+use crate::common::fastq::{
+    format_into_blocks, recv_pair_step, spawn_reader, FastqRecord, PairStep,
+};
+use crate::io_utils::{open_block_writer, BlockWriter};
 
 #[derive(Args, Debug)]
 pub struct RescueArgs {
@@ -56,6 +66,10 @@ pub struct RescueArgs {
     /// (otherwise an ID mismatch is usually itself the corruption point).
     #[arg(long)]
     no_pair_check: bool,
+
+    /// Records processed per parallel compression batch.
+    #[arg(long, default_value_t = 50_000)]
+    chunk_records: usize,
 }
 
 pub fn run(args: RescueArgs) -> Result<()> {
@@ -90,15 +104,21 @@ fn run_se(args: &RescueArgs) -> Result<()> {
     let start = Instant::now();
     log::info!("rescuing {} -> {}", args.in1.display(), args.out1.display());
     let rx = spawn_reader(args.in1.clone())?;
-    let mut writer = open_writer(&args.out1)?;
+    let mut writer = open_block_writer(&args.out1)?;
 
+    let mut chunk: Vec<FastqRecord> = Vec::with_capacity(args.chunk_records);
     let mut rescued: u64 = 0;
     let mut corrupted = false;
     loop {
         match rx.recv() {
             Ok(Ok(rec)) => {
-                rec.write_to(writer.as_mut())?;
+                chunk.push(rec);
                 rescued += 1;
+                if chunk.len() >= args.chunk_records {
+                    let refs: Vec<&FastqRecord> = chunk.iter().collect();
+                    writer.write_blocks(format_into_blocks(&refs)?)?;
+                    chunk.clear();
+                }
             }
             Ok(Err(e)) => {
                 log::warn!("stopping at read #{}: {e}", rescued + 1);
@@ -108,12 +128,11 @@ fn run_se(args: &RescueArgs) -> Result<()> {
             Err(_) => break, // clean, synchronized EOF
         }
     }
+    if !chunk.is_empty() {
+        let refs: Vec<&FastqRecord> = chunk.iter().collect();
+        writer.write_blocks(format_into_blocks(&refs)?)?;
+    }
     writer.flush()?;
-    // `finish()` below may call `std::process::exit`, which skips destructors
-    // entirely -- drop the writer explicitly first so a gzip encoder gets to
-    // write its trailer (CRC32 + size) before the process disappears.
-    // Without this, --out1 ending in .gz comes out truncated too.
-    drop(writer);
 
     if corrupted {
         log::warn!("input looks truncated/corrupted: rescued {rescued} clean read(s) before the failure point");
@@ -123,6 +142,19 @@ fn run_se(args: &RescueArgs) -> Result<()> {
     log::info!("done in {:.2?}", start.elapsed());
 
     finish(corrupted, rescued)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_pe_chunk(
+    chunk: &[(FastqRecord, FastqRecord)],
+    w1: &mut BlockWriter,
+    w2: &mut BlockWriter,
+) -> Result<()> {
+    let r1s: Vec<&FastqRecord> = chunk.iter().map(|(a, _)| a).collect();
+    let r2s: Vec<&FastqRecord> = chunk.iter().map(|(_, b)| b).collect();
+    w1.write_blocks(format_into_blocks(&r1s)?)?;
+    w2.write_blocks(format_into_blocks(&r2s)?)?;
+    Ok(())
 }
 
 fn run_pe(args: &RescueArgs, in2: &Path, out2: &Path) -> Result<()> {
@@ -136,10 +168,11 @@ fn run_pe(args: &RescueArgs, in2: &Path, out2: &Path) -> Result<()> {
     );
     let rx1 = spawn_reader(args.in1.clone())?;
     let rx2 = spawn_reader(in2.to_path_buf())?;
-    let mut w1 = open_writer(&args.out1)?;
-    let mut w2 = open_writer(out2)?;
+    let mut w1 = open_block_writer(&args.out1)?;
+    let mut w2 = open_block_writer(out2)?;
     let check_ids = !args.no_pair_check;
 
+    let mut chunk: Vec<(FastqRecord, FastqRecord)> = Vec::with_capacity(args.chunk_records);
     let mut rescued: u64 = 0;
     let mut corrupted = false;
     loop {
@@ -156,9 +189,12 @@ fn run_pe(args: &RescueArgs, in2: &Path, out2: &Path) -> Result<()> {
                     corrupted = true;
                     break;
                 }
-                r1.write_to(w1.as_mut())?;
-                r2.write_to(w2.as_mut())?;
+                chunk.push((r1, r2));
                 rescued += 1;
+                if chunk.len() >= args.chunk_records {
+                    flush_pe_chunk(&chunk, &mut w1, &mut w2)?;
+                    chunk.clear();
+                }
             }
             PairStep::Eof => break, // clean, synchronized EOF on both mates
             PairStep::CountMismatch => {
@@ -176,11 +212,11 @@ fn run_pe(args: &RescueArgs, in2: &Path, out2: &Path) -> Result<()> {
             }
         }
     }
+    if !chunk.is_empty() {
+        flush_pe_chunk(&chunk, &mut w1, &mut w2)?;
+    }
     w1.flush()?;
     w2.flush()?;
-    // See the matching comment in `run_se`: drop before a possible `process::exit`.
-    drop(w1);
-    drop(w2);
 
     if corrupted {
         log::warn!("input looks truncated/corrupted: rescued {rescued} clean read pair(s) before the failure point");

@@ -84,22 +84,34 @@
 `if genorush fastx rescue ...; then ... elif [ $? -eq 3 ]; then echo "只拯救了部分，去看日志"; else echo "这个文件没法用"; fi`
 这样有意义的分支逻辑。
 
-### 一个坑：`std::process::exit` 不会执行析构函数
+### 一个坑：`std::process::exit` 不会执行析构函数（以及 `BlockWriter` 为什么绕开了它）
 
 `rescue.rs` 里的 `finish()` 对 1/3 这两种情况直接调用了
 `std::process::exit(code)`，因为 Rust 常规的 `main() -> Result<()>` 退出码
 约定只能区分 0 和 1。但 `std::process::exit` 会**立即**终止进程，**不执行任何
-析构函数**——这在这里影响很大，因为 `io_utils::open_writer` 的 gzip 分支
-（`flate2::write::GzEncoder`）是在它的 `Drop` 实现里才写入尾部校验信息（CRC32
-+ 原始大小），而不是在 `flush()` 的时候写。如果 `GzEncoder` 还活着的时候就调用
-了 `process::exit`，产出的 `.gz` 文件会有合法的文件头和正文，但尾部缺失/不完整
-——任何 gzip 读取工具都会正确地判定这个文件是"被截断的"。所以 `run_se`/
-`run_pe` 在调用 `finish()` **之前**，先 `writer.flush()` 再显式
-`drop(writer)`（或者 `drop(w1); drop(w2);`），强制让编码器的尾部在正常的
-Rust 作用域析构机制还生效的时候就写下去。这个问题不是设计阶段就想到的，而是
-测试的时候撞出来的：第一版产出的 `.gz` 文件被 `gzip -t` 判定为损坏，尽管拯救出
-来的**内容**本身逐字节都是对的——以后任何一个命令，只要同时用到"可能提前退出
-的代码路径"和"包着压缩器的 `Box<dyn Write>`"，都值得留意这一点。
+析构函数**——这个命令第一版就正好撞上了这个坑：当时写入用的是
+`io_utils::open_writer`，它的 gzip 分支是一个长期存活的单个
+`flate2::write::GzEncoder`，尾部校验信息（CRC32 + 原始大小）是在它的 `Drop`
+实现里才写的，不是在 `flush()` 的时候。`GzEncoder` 还活着的时候就调用
+`process::exit`，产出的 `.gz` 文件会有合法的文件头和正文，但尾部缺失——任何
+gzip 读取工具都会正确地判定这个文件"被截断了"，尽管拯救出来的**内容**本身
+逐字节都是对的。当时的修法是在调用 `finish()` 之前显式 `drop(writer)`，强制
+让编码器的尾部在正常的 Rust 作用域析构机制还生效的时候就写下去。
+
+现在这个 workaround 已经不在代码里了——不是因为又打了个补丁绕过去，而是因为
+它所针对的那个类型本身已经不用了。`rescue` 后来迁移到了
+`io_utils::BlockWriter`（为什么要有这个类型见 `docs/zh/sample.md`），跟其他
+分块处理的命令一样拿到了并行压缩：确认无误的记录攒够 `--chunk-records` 一批
+就交给 `write_blocks`，一旦碰到损坏或者输入读完，剩下不满一批的也会立刻冲刷
+写出。`BlockWriter` 的 gzip 分支是给每一块都**现建一个**`GzEncoder`，并且在
+产出这个 encoder 的**同一次** `write_blocks` 调用里同步调用 `.finish()`——
+所以 `write_blocks` 一返回，每个 gzip member 就已经完整了，尾部也已经写好，
+不存在任何依赖 `Drop` 才会补上的、悬而未决的编码器状态，也就没有什么能被
+`process::exit` 弄丢了。`writer.flush()`（`finish()` 之前依然会调用）现在
+只需要把底层 `BufWriter` 缓冲区里的字节推给操作系统，是个很直白、没有风险的
+操作。这条经验本身还是值得记住——把"可能提前退出的代码路径"和"把关键工作
+推迟到 `Drop` 里做的东西"混在一起用是个陷阱——只是这个具体案例在这份代码库里
+已经不复存在了。
 
 ## 局限性
 

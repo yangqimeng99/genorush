@@ -11,7 +11,7 @@ use anyhow::{ensure, Context, Result};
 use clap::Args;
 use rayon::prelude::*;
 
-use crate::io_utils::{open_reader, open_writer, read_line_chunk, write_lines};
+use crate::io_utils::{open_block_writer, open_reader, read_line_chunk, BlockWriter};
 
 #[derive(Args, Debug)]
 pub struct RenameCommonArgs {
@@ -66,6 +66,31 @@ pub fn load_name_dict(path: &std::path::Path) -> Result<HashMap<String, String>>
     Ok(map)
 }
 
+/// Splits `lines` into up to `rayon::current_num_threads()` byte blocks
+/// (newline-joined), so `BlockWriter::write_blocks` has independent units
+/// of work to gzip-compress in parallel. Mirrors
+/// `common::fastq::format_into_blocks`, just for plain text lines instead
+/// of `FastqRecord`s -- `rename` works on FASTA/GFF lines, which have no
+/// FASTQ-style record structure to preserve.
+fn lines_into_blocks(lines: &[String]) -> Vec<Vec<u8>> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let n = rayon::current_num_threads().max(1).min(lines.len());
+    let chunk_size = lines.len().div_ceil(n);
+    lines
+        .chunks(chunk_size)
+        .map(|group| {
+            let mut buf = Vec::new();
+            for line in group {
+                buf.extend_from_slice(line.as_bytes());
+                buf.push(b'\n');
+            }
+            buf
+        })
+        .collect()
+}
+
 /// Streams `args.input` to `args.output`, applying `transform` to every line
 /// in parallel batches of `args.chunk_lines`. `transform` receives the
 /// trimmed line and the loaded name dictionary.
@@ -87,7 +112,7 @@ pub fn run(
     );
 
     let mut reader = open_reader(&args.input)?;
-    let mut writer = open_writer(&args.output)?;
+    let mut writer: BlockWriter = open_block_writer(&args.output)?;
 
     let mut chunk = Vec::with_capacity(args.chunk_lines);
     let mut total_lines: u64 = 0;
@@ -97,7 +122,7 @@ pub fn run(
             break;
         }
         let out: Vec<String> = chunk.par_iter().map(|l| transform(l, &dict)).collect();
-        write_lines(writer.as_mut(), &out)?;
+        writer.write_blocks(lines_into_blocks(&out))?;
         total_lines += n as u64;
     }
     writer.flush().context("failed to flush output")?;
