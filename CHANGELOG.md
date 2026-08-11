@@ -5,6 +5,32 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `fastx interleave`: merge R1/R2 into a single standard interleaved FASTQ.
+- `fastx deinterleave`: split a merged FASTQ back into R1/R2, auto-detecting
+  whether the input is properly interleaved (`R1,R2,R1,R2,...`) or a naive
+  `cat R1 R2`-style concatenation (all R1 records, then all R2) -- these
+  are different byte layouts, not the same format, and a splitter that
+  assumes one and gets the other silently fabricates broken pairs.
+  Refuses to guess when neither hypothesis holds cleanly; `--layout` skips
+  detection when the layout is already known. See
+  `docs/en/interleave.md` / `docs/zh/interleave.md`.
+- `fastx cat`: concatenate FASTQ files from repeated sequencing runs of the
+  same sample (multiple lanes/flowcells), hashing every read ID as it
+  streams through and aborting with the specific files/positions involved
+  if a duplicate turns up -- catches the realistic failure mode (the same
+  file accidentally included twice) that plain `cat` has no way to detect.
+  Paired-end mode also re-verifies R1/R2 pairing within each source file
+  pair. See `docs/en/cat.md` / `docs/zh/cat.md`.
+- `common::hash`: a small, dependency-free FNV-1a hash, shared by
+  `deinterleave`'s layout detection and `cat`'s duplicate-ID check for
+  comparing read IDs across huge inputs without keeping every ID string in
+  memory.
+- `common::fastq::format_into_blocks` (moved out of `fastx sample`,
+  unchanged behavior) is now shared by every command that buffers a batch
+  of records for parallel-compressed `BlockWriter` output.
+
 ### Changed
 
 - Release workflow no longer builds `macos-x86_64` (Intel, the `macos-13`

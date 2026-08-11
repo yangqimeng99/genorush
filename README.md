@@ -39,6 +39,9 @@ genorush <category> <action> [options]
 | `gff`    | `rename` | Rename the seqid column in a GFF/GTF file via a mapping table |
 | `fastx`  | `sample` | Downsample FASTQ reads by proportion or exact count, single- or paired-end |
 | `fastx`  | `rescue` | Recover the leading run of clean reads from a truncated/corrupted FASTQ, single- or paired-end |
+| `fastx`  | `interleave` | Merge R1/R2 into a single standard interleaved FASTQ |
+| `fastx`  | `deinterleave` | Split a merged FASTQ (interleaved or R1-then-R2 concatenated, auto-detected) back into R1/R2 |
+| `fastx`  | `cat` | Concatenate FASTQ from repeated sequencing runs, checking for duplicate read IDs |
 
 Every subcommand accepts a global `-j/--threads` flag (default: `1`; pass
 `0` to use all logical cores).
@@ -92,6 +95,37 @@ clean read (`0`) from a partial rescue (`3`) from nothing salvageable
 (`1`), so it composes into scripts. See
 [`docs/en/rescue.md`](docs/en/rescue.md) for the full design writeup.
 
+### `fastx interleave` / `fastx deinterleave`
+
+```bash
+genorush fastx interleave -i R1.fq.gz -I R2.fq.gz -o merged.fq.gz
+
+# layout (interleaved vs. a naive `cat R1 R2`-style concatenation) is
+# auto-detected by default -- pass --layout to skip detection if known
+genorush fastx deinterleave -i merged.fq.gz -o R1.fq.gz -O R2.fq.gz
+```
+
+`fastx deinterleave` doesn't assume a merged file is properly interleaved:
+`cat R1.fastq R2.fastq > merged.fastq` is common in the wild and is a
+completely different byte layout that a naive splitter would silently get
+wrong. See [`docs/en/interleave.md`](docs/en/interleave.md) for the
+detection algorithm.
+
+### `fastx cat`
+
+```bash
+genorush fastx cat --r1 run1_R1.fq.gz --r1 run2_R1.fq.gz \
+                    --r2 run1_R2.fq.gz --r2 run2_R2.fq.gz \
+                    -o merged_R1.fq.gz -O merged_R2.fq.gz
+```
+
+For concatenating repeated sequencing runs of the same sample. Unlike
+plain `cat`, this checks for duplicate read IDs across the inputs as it
+streams through and aborts with the specific files/positions involved --
+catching the realistic failure mode (the same file accidentally listed
+twice) instead of silently doubling coverage. See
+[`docs/en/cat.md`](docs/en/cat.md).
+
 ## Design notes for contributors
 
 - `src/main.rs` wires a two-level `clap` command tree:
@@ -100,18 +134,22 @@ clean read (`0`) from a partial rescue (`3`) from nothing salvageable
   dispatcher; each action is its own file.
 - `src/common/` holds logic shared across categories: `rename.rs` (the
   chunked-parallel line-transform engine), `fastq.rs` (a minimal FASTQ
-  record model plus the concurrent-mate-reading/pairing infrastructure
-  shared by `sample` and `rescue`), `rng.rs` (a dependency-free SplitMix64
-  RNG, both a stateless index-keyed variant for parallel sampling and a
-  stateful variant for sequential algorithms like reservoir sampling).
+  record model plus the concurrent-mate-reading/pairing infrastructure and
+  parallel-block formatting shared by `sample`, `rescue`, `interleave`,
+  `deinterleave`, and `cat`), `rng.rs` (a dependency-free SplitMix64 RNG,
+  both a stateless index-keyed variant for parallel sampling and a
+  stateful variant for sequential algorithms like reservoir sampling),
+  `hash.rs` (a small FNV-1a hash used to compare/deduplicate read IDs
+  across huge inputs without keeping full ID strings in memory --
+  `deinterleave`'s layout detection and `cat`'s duplicate-ID check).
 - `src/io_utils.rs` provides transparent gzip/bgzip-aware readers and
   writers used by every command — detect by magic bytes on read, by `.gz`
   extension on write. `BlockWriter` is the batch-oriented writer used by
-  chunk-processing commands (`fastx sample`): it compresses multiple
-  blocks into independent gzip members in parallel via `-j`/rayon (the
-  same multi-member technique `pigz` uses), since standard gzip
-  decompression can't be parallelized for a single stream but compressing
-  data this tool generates itself can be.
+  chunk-processing commands: it compresses multiple blocks into
+  independent gzip members in parallel via `-j`/rayon (the same
+  multi-member technique `pigz` uses), since standard gzip decompression
+  can't be parallelized for a single stream but compressing data this tool
+  generates itself can be.
 - Every command ships with unit tests for its non-trivial shared logic
   (`cargo test`) and is clippy-clean (`cargo clippy --all-targets`).
 - Full design rationale per command lives under `docs/en/` (English) and

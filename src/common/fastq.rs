@@ -183,6 +183,31 @@ pub fn recv_pair_step(
     }
 }
 
+/// Splits `records` into up to `rayon::current_num_threads()` byte blocks,
+/// each holding one sub-range's worth of formatted FASTQ text, so
+/// `io_utils::BlockWriter::write_blocks` has independent units of work to
+/// gzip-compress in parallel. Splitting -- not the compression itself --
+/// happens sequentially here; it's cheap (no compression, just formatting)
+/// next to the compression work it sets up. Shared by every command that
+/// buffers a batch of records and hands them to `BlockWriter` (`fastx
+/// sample`, `fastx deinterleave`, `fastx interleave`, `fastx cat`).
+pub fn format_into_blocks(records: &[&FastqRecord]) -> Result<Vec<Vec<u8>>> {
+    if records.is_empty() {
+        return Ok(vec![]);
+    }
+    let n = rayon::current_num_threads().max(1).min(records.len());
+    let chunk_size = records.len().div_ceil(n);
+    let mut blocks = Vec::with_capacity(n);
+    for group in records.chunks(chunk_size) {
+        let mut buf = Vec::new();
+        for r in group {
+            r.write_to(&mut buf)?;
+        }
+        blocks.push(buf);
+    }
+    Ok(blocks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
