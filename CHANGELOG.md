@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.3.0] - 2026-08-11
 
 ### Added
 
@@ -64,6 +64,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   since decompression was already the sole bottleneck either way.
 - `io_utils::open_writer`/`write_lines` removed (dead code once the above
   three commands migrated off them).
+- Every subcommand's `--help` (long form) now states a recommended
+  `-j/--threads` value, derived from measuring this machine's actual
+  single-thread decompression throughput (~159 MB/s) against gzip
+  compression throughput at increasing thread counts (~12 MB/s at `-j 1`
+  scaling to ~56 MB/s at `-j 8`, ~77 MB/s at `-j 12`, with sharply
+  diminishing returns past `-j 8`). Since decompression is hard-capped at
+  1-2 threads regardless of `-j` (a single gzip stream can't be
+  parallelized) but compression scales with it, the useful ceiling is
+  command-specific: `-j 8` for commands where write volume is close to
+  read volume (`rename`/`gff rename`/`rescue`/`interleave`/`deinterleave`/
+  `cat`, where compression remains the bottleneck even at high thread
+  counts on the hardware measured), `-j 1-2` for `fastx sample` at
+  typical light sampling proportions (write volume scales with `-p`/`-n`,
+  so less compression work needs fewer threads to stop being the
+  bottleneck), `-j 8` for `sample` when keeping most of the input.
+  Exact numbers are hardware-dependent; the qualitative shape (capped
+  read side, command-dependent write-side ceiling) is not.
 
 ## [0.2.0] - 2026-08-09
 

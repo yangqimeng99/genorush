@@ -10,7 +10,12 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "genorush", version, propagate_version = true)]
 struct Cli {
-    /// Worker threads for parallel processing (default: 1; pass 0 to use all logical cores)
+    /// Worker threads for parallel processing (default: 1; pass 0 to use all
+    /// logical cores). Only speeds up compressing output, not decompressing
+    /// input (a single gzip stream can't be decompressed in parallel), so
+    /// the useful ceiling depends on the command and how much it writes
+    /// relative to what it reads -- see `<category> <action> --help` for a
+    /// per-command recommendation.
     #[arg(short = 'j', long, global = true, default_value_t = 1)]
     threads: usize,
 
