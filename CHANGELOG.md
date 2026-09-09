@@ -3,6 +3,66 @@
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`fastx deinterleave --layout by-suffix`**: routes every record by the
+  `/1` or `/2` marker in its own header, ignoring position entirely. This
+  covers merged files that are neither interleaved nor a two-half
+  concatenation. The case that prompted it, `SRR17458599.fastq.gz`
+  (14.76 GB, 399,065,686 records), is laid out as three runs -- 24,174,089
+  R2 records, then all 199,532,843 R1 records, then the remaining
+  175,358,754 R2 records -- with a globally sequential read numbering that
+  gives the two mates of a pair *different* ids (`@SRR17458599.1 1/2` is
+  mated to `@SRR17458599.24174090 24174090/1`). No positional rule splits
+  that file and no id comparison pairs it up; the per-record marker is the
+  only information available, which is why the shell `awk` pipelines in
+  circulation handle such files when a positional splitter cannot. Single
+  pass, O(1) memory. Verified byte-identical to the `awk` pipeline it
+  replaces. See `docs/en/interleave.md` / `docs/zh/interleave.md`.
+- `common::fastq::Mate` and `FastqRecord::mate_suffix()`: reads a `/1` or
+  `/2` marker from anywhere in a header (followed by whitespace or
+  end-of-header), not just off the end of the first token as `base_id()`
+  does -- required for SRA-style headers where the marker sits in a second
+  field. Modern Illumina `1:N:0:` fields are deliberately not treated as
+  markers.
+- Unit tests for `fastx deinterleave`, which previously had none: routing
+  for all three splitters, each guard's rejection path, `--no-pair-check`,
+  a concat split whose midpoint falls inside a chunk, and the head probe's
+  verdicts.
+
+### Changed
+
+- **`fastx deinterleave --layout auto` now probes the head of the file**
+  (4096 records) to choose a strategy, instead of always reading the entire
+  input to hash every `base_id()` into memory first. That scan cost 5
+  minutes and 3.05 GiB of RSS on the file above -- only to report that
+  neither positional hypothesis held. It remains as a fallback for the one
+  case that still needs it: files whose records carry no mate markers and
+  whose mates share ids. Probing decides but does not prove, so each
+  splitter now re-checks its own assumption while writing (see below); the
+  trade is that a violation is caught after some output has been written
+  rather than before any is, in exchange for not reading multi-gigabyte
+  inputs twice.
+- **The splitters now verify the layout they were told to use.** Previously
+  an explicit `--layout` was trusted blindly, and on a file like the one
+  above `--layout concat` produced a complete, plausible-looking, silently
+  mate-swapped pair of outputs while `--layout interleaved` produced
+  garbage -- both exiting 0. Now `interleaved` requires the two records of
+  each pair to share a base id, `concat` requires the marked records within
+  each half to agree and the two halves to differ, and either failure names
+  the offending record and points at the mode that would handle the file.
+  `--no-pair-check` opts out.
+- `fastx deinterleave` reports an error when R1 and R2 end up with
+  different record counts. Positional splits get equal counts for free;
+  `by-suffix` cannot, and unequal counts mean the outputs (written in full)
+  can't be treated as positionally paired downstream.
+- `--layout concat` warns when the first half of the input is R2 and the
+  second is R1, since `--out1` then holds the R2 reads.
+- An empty input is now an error for every `--layout`, not just `auto`;
+  the explicit modes used to exit 0 after writing two empty files.
+
 ## [0.3.0] - 2026-08-11
 
 ### Added

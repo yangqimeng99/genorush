@@ -39,7 +39,7 @@ genorush <类别> <动作> [选项]
 | `fastx`   | `sample`   | 按比例或精确条数对 FASTQ reads 下采样，支持单端/双端 |
 | `fastx`   | `rescue`   | 从损坏/截断的 FASTQ 里拯救出开头那段完好的 reads，支持单端/双端 |
 | `fastx`   | `interleave`   | 把 R1/R2 合并成一个标准 interleaved FASTQ |
-| `fastx`   | `deinterleave` | 把合并过的 FASTQ（interleaved 或者 cat 拼接，自动识别）拆回 R1/R2 |
+| `fastx`   | `deinterleave` | 把合并过的 FASTQ 拆回 R1/R2：按位置（interleaved 或 cat 拼接），或按 header 里的 `/1`、`/2` 标记 |
 | `fastx`   | `cat`      | 合并多次测序的 FASTQ 文件，同时校验有没有重复的 read ID |
 
 所有子命令都支持全局参数 `-j/--threads`（默认 `1`；传 `0` 表示使用全部逻辑核心）。
@@ -92,14 +92,49 @@ genorush fastx rescue -i R1.fq.gz -I R2.fq.gz -o R1.rescued.fq.gz -O R2.rescued.
 ```bash
 genorush fastx interleave -i R1.fq.gz -I R2.fq.gz -o merged.fq.gz
 
-# 布局（interleaved 还是简单 cat R1 R2 拼接）默认自动识别——
-# 已经知道是哪种的话可以传 --layout 跳过检测
+# 拆回去。--layout auto（默认）会探测前几千条记录来选择策略，
+# 其他取值则跳过探测。
 genorush fastx deinterleave -i merged.fq.gz -o R1.fq.gz -O R2.fq.gz
 ```
 
+`--layout` 各取值的实际用法：
+
+```bash
+# by-suffix：按每条记录自己 header 里的 /1、/2 标记分流，完全不看位置。
+# 适用于位置根本说明不了问题的文件——比如 SRA 来源的 FASTQ，mate 分成
+# 三段而不是两段，而且全局连续编号让一对 mate 拿到不同的 ID
+# （@SRR17458599.1 1/2 的配对读段是 @SRR17458599.24174090 24174090/1）。
+# 单遍扫描，常数内存。
+genorush fastx deinterleave -i merged.fq.gz --layout by-suffix \
+    -o R1.fq.gz -O R2.fq.gz -j 8
+
+# interleaved：R1,R2,R1,R2,... 单遍扫描。写出的同时会校验每一对
+# 是否共享同一个 read ID。
+genorush fastx deinterleave -i merged.fq.gz --layout interleaved \
+    -o R1.fq.gz -O R2.fq.gz
+
+# concat：先全部 R1 再全部 R2（即 `cat R1.fq R2.fq`）。需要知道中点，
+# 所以会先做一遍只计数的廉价扫描。带 mate 标记的记录在写出时会与
+# 所属的那一半做一致性校验。
+genorush fastx deinterleave -i merged.fq.gz --layout concat \
+    -o R1.fq.gz -O R2.fq.gz
+
+# --no-pair-check 关闭上面两个按位置模式的写入期校验。只有当你的 header
+# 不遵循标准的 /1+/2 或 Illumina 1:...+2:... 约定、导致校验误报时才用它。
+genorush fastx deinterleave -i merged.fq.gz --layout interleaved \
+    --no-pair-check -o R1.fq.gz -O R2.fq.gz
+```
+
+一旦触发这些校验，运行会报出具体的记录序号、指出应该改用哪个模式，并以
+非零码退出；此时已经写出的部分输出必须丢弃。
+
 `fastx deinterleave` 不会假设合并文件就是规范 interleaved 的：
 `cat R1.fastq R2.fastq > merged.fastq` 在实际使用中很常见，这是完全不同的字节
-布局，一个天真的拆分工具会悄悄拆错。检测算法见
+布局，一个天真的拆分工具会悄悄拆错。它同样不假设文件一定是"按位置"的——
+真实的 SRA 来源文件会出现 mate 分成三段而不是两段、并且全局编号让一对 mate
+拿到不同 ID 的情况，这时除了每条记录自己的 `/1`、`/2` 标记之外没有任何东西
+能把它们分开。`--layout auto` 会探测文件头部来选择策略，而无论最终走哪个
+拆分函数，它都会在写出的过程中逐条复核自己的假设。检测算法与相关取舍见
 [`docs/zh/interleave.md`](docs/zh/interleave.md)。
 
 ### `fastx cat`

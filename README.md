@@ -40,7 +40,7 @@ genorush <category> <action> [options]
 | `fastx`  | `sample` | Downsample FASTQ reads by proportion or exact count, single- or paired-end |
 | `fastx`  | `rescue` | Recover the leading run of clean reads from a truncated/corrupted FASTQ, single- or paired-end |
 | `fastx`  | `interleave` | Merge R1/R2 into a single standard interleaved FASTQ |
-| `fastx`  | `deinterleave` | Split a merged FASTQ (interleaved or R1-then-R2 concatenated, auto-detected) back into R1/R2 |
+| `fastx`  | `deinterleave` | Split a merged FASTQ back into R1/R2, by position (interleaved or R1-then-R2 concatenated) or by the `/1`+`/2` header markers |
 | `fastx`  | `cat` | Concatenate FASTQ from repeated sequencing runs, checking for duplicate read IDs |
 
 Every subcommand accepts a global `-j/--threads` flag (default: `1`; pass
@@ -100,16 +100,56 @@ clean read (`0`) from a partial rescue (`3`) from nothing salvageable
 ```bash
 genorush fastx interleave -i R1.fq.gz -I R2.fq.gz -o merged.fq.gz
 
-# layout (interleaved vs. a naive `cat R1 R2`-style concatenation) is
-# auto-detected by default -- pass --layout to skip detection if known
+# Splitting back apart. --layout auto (the default) probes the first few
+# thousand records and picks a strategy; the other values skip the probe.
 genorush fastx deinterleave -i merged.fq.gz -o R1.fq.gz -O R2.fq.gz
 ```
+
+`--layout` in practice:
+
+```bash
+# by-suffix: route each record by the /1 or /2 marker in its own header,
+# ignoring position entirely. This is the mode for files where position
+# says nothing -- e.g. SRA-derived FASTQ whose mates come in several runs
+# rather than two, and whose global read numbering gives the two mates of
+# a pair different ids (@SRR17458599.1 1/2 mated to @SRR17458599.24174090
+# 24174090/1). Single pass, constant memory.
+genorush fastx deinterleave -i merged.fq.gz --layout by-suffix \
+    -o R1.fq.gz -O R2.fq.gz -j 8
+
+# interleaved: R1,R2,R1,R2,... Single pass. Each pair is verified to share
+# a read id as it is written.
+genorush fastx deinterleave -i merged.fq.gz --layout interleaved \
+    -o R1.fq.gz -O R2.fq.gz
+
+# concat: all R1 records, then all R2 records (`cat R1.fq R2.fq`). Needs
+# the midpoint, so it counts records in a cheap first pass. Records that
+# carry mate markers are checked against their half as they are written.
+genorush fastx deinterleave -i merged.fq.gz --layout concat \
+    -o R1.fq.gz -O R2.fq.gz
+
+# --no-pair-check turns off those write-time checks for the positional
+# modes. Reach for it only when your headers don't follow the standard
+# /1+/2 or Illumina 1:...+2:... conventions and the checks cry wolf.
+genorush fastx deinterleave -i merged.fq.gz --layout interleaved \
+    --no-pair-check -o R1.fq.gz -O R2.fq.gz
+```
+
+A run that trips one of those checks stops with the offending record
+number, names the mode that would handle the file, and exits non-zero; its
+partial outputs must be discarded.
 
 `fastx deinterleave` doesn't assume a merged file is properly interleaved:
 `cat R1.fastq R2.fastq > merged.fastq` is common in the wild and is a
 completely different byte layout that a naive splitter would silently get
-wrong. See [`docs/en/interleave.md`](docs/en/interleave.md) for the
-detection algorithm.
+wrong. Nor does it assume the file is positional at all — SRA-derived files
+turn up with the mates in several runs rather than two, and with a global
+read numbering that gives the two mates of a pair different ids, so nothing
+but each record's own `/1`/`/2` marker can route them. `--layout auto`
+probes the head of the file to pick a strategy, and whichever splitter runs
+re-checks its assumption on every record as it writes. See
+[`docs/en/interleave.md`](docs/en/interleave.md) for the detection
+algorithm and the trade-offs.
 
 ### `fastx cat`
 
