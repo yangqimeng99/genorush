@@ -39,7 +39,12 @@ enum FastxCommand {
     /// compression dominates. Recommended -j 8; less matters more if
     /// corruption is near the very start (little gets written either way).
     Rescue(rescue::RescueArgs),
-    /// Split a merged paired-end FASTQ (interleaved or R1-then-R2 concatenated) back into R1/R2
+    /// Split a merged paired-end FASTQ back into R1/R2, by position or by /1 and /2 header markers
+    ///
+    /// Handles both positional layouts (interleaved, or R1-then-R2
+    /// concatenated) and files where position carries no information at all
+    /// and each record's own `/1`/`/2` marker is the only thing that says
+    /// which mate it is -- see --layout.
     ///
     /// -j/--threads: nothing is discarded, just split across two files, so
     /// total write volume equals read volume and compression is the

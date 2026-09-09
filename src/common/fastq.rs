@@ -27,6 +27,32 @@ pub struct FastqRecord {
     pub qual: String,
 }
 
+/// Which mate of a pair a record belongs to, as declared by the record's own
+/// header rather than by its position in a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mate {
+    R1,
+    R2,
+}
+
+/// True if `header` carries a `/1` (or `/2`) mate marker: the two-byte
+/// sequence followed by whitespace or the end of the header. Scans the whole
+/// header, not just the first token, because the marker frequently sits in a
+/// later field (SRA-derived headers look like `@SRR17458599.1 1/2`).
+fn has_mate_marker(header: &str, digit: u8) -> bool {
+    let b = header.as_bytes();
+    for i in 0..b.len().saturating_sub(1) {
+        if b[i] == b'/' && b[i + 1] == digit {
+            match b.get(i + 2) {
+                None => return true,
+                Some(c) if c.is_ascii_whitespace() => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 impl FastqRecord {
     pub fn write_to(&self, w: &mut dyn Write) -> std::io::Result<()> {
         writeln!(w, "{}", self.header)?;
@@ -46,6 +72,28 @@ impl FastqRecord {
             .strip_suffix("/1")
             .or_else(|| first.strip_suffix("/2"))
             .unwrap_or(first)
+    }
+
+    /// Which mate this record declares itself to be, from a `/1` or `/2`
+    /// marker anywhere in the header. `None` when the header carries no such
+    /// marker at all -- notably modern Illumina headers (`@ID 1:N:0:ATCG`),
+    /// where the mate number is a field of its own and is deliberately *not*
+    /// treated as a marker here: `1:N:0:` is a read-attribute field, and
+    /// reading it as a mate suffix would misclassify any header that happens
+    /// to contain a similar-looking field.
+    ///
+    /// Unlike `base_id`, which only strips a marker off the end of the first
+    /// token, this scans the entire header, so it also covers the SRA-style
+    /// `@SRR17458599.1 1/2` layout where the marker follows a second field.
+    /// `/1` is tested before `/2`, so a header carrying both resolves to R1.
+    pub fn mate_suffix(&self) -> Option<Mate> {
+        if has_mate_marker(&self.header, b'1') {
+            Some(Mate::R1)
+        } else if has_mate_marker(&self.header, b'2') {
+            Some(Mate::R2)
+        } else {
+            None
+        }
     }
 }
 
@@ -294,6 +342,50 @@ mod tests {
         };
         assert_eq!(r1.base_id(), "READ_1");
         assert_eq!(r1.base_id(), r2.base_id());
+    }
+
+    fn mate_of(header: &str) -> Option<Mate> {
+        rec(header).mate_suffix()
+    }
+
+    #[test]
+    fn mate_suffix_reads_legacy_trailing_marker() {
+        assert_eq!(mate_of("@READ_1/1"), Some(Mate::R1));
+        assert_eq!(mate_of("@READ_1/2"), Some(Mate::R2));
+    }
+
+    #[test]
+    fn mate_suffix_reads_marker_in_a_later_field() {
+        // SRA-derived layout: the marker is not in the first token, and the
+        // two mates do not even share the leading numeric id.
+        assert_eq!(mate_of("@SRR17458599.1 1/2"), Some(Mate::R2));
+        assert_eq!(mate_of("@SRR17458599.24174090 24174090/1"), Some(Mate::R1));
+    }
+
+    #[test]
+    fn mate_suffix_accepts_marker_followed_by_whitespace() {
+        assert_eq!(mate_of("@READ/1 length=100"), Some(Mate::R1));
+        assert_eq!(mate_of("@READ/2\tlength=100"), Some(Mate::R2));
+    }
+
+    #[test]
+    fn mate_suffix_rejects_marker_glued_to_more_text() {
+        // "/1x" is not a mate marker: it must end the header or be followed
+        // by whitespace, matching the `/\/1(\s|$)/` convention.
+        assert_eq!(mate_of("@READ/12"), None);
+        assert_eq!(mate_of("@READ/1x"), None);
+    }
+
+    #[test]
+    fn mate_suffix_is_none_for_modern_illumina_headers() {
+        assert_eq!(mate_of("@READ_1 1:N:0:ATCG"), None);
+        assert_eq!(mate_of("@READ_1 2:N:0:ATCG"), None);
+    }
+
+    #[test]
+    fn mate_suffix_is_none_when_no_marker_at_all() {
+        assert_eq!(mate_of("@READ_1"), None);
+        assert_eq!(mate_of("@"), None);
     }
 
     #[test]
