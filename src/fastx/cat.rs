@@ -20,7 +20,7 @@
 //! the same mechanism `fastx sample`/`fastx rescue` use) -- catching a
 //! corrupt or mismatched individual run, not just cross-run duplicates.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -30,9 +30,9 @@ use clap::Args;
 use crate::common::fastq::{
     format_into_blocks, recv_pair_step, spawn_reader, FastqRecord, PairStep,
 };
-use crate::common::hash::fnv1a;
+use crate::common::hash::{fnv1a, BuildIdHasher};
 use crate::io_utils::{
-    display, ensure_one_stdio_at_most, open_block_writer, BlockWriter, OutputOpts, STDIO,
+    display, ensure_one_stdio_at_most, is_stdio, open_block_writer, BlockWriter, OutputOpts, STDIO,
 };
 
 #[derive(Args, Debug)]
@@ -102,30 +102,91 @@ pub fn run(args: CatArgs, opts: OutputOpts) -> Result<()> {
     }
 }
 
-/// Records the source file + local record index (0-based) where a hash was
-/// first seen, so a duplicate hit can report exactly what to go check.
-/// Positions are reported 1-based, matching every other command's errors.
-type SeenIds = HashMap<u64, (PathBuf, u64)>;
+/// Every read ID seen so far, as `fnv1a` hashes and nothing else.
+///
+/// This set is the command's whole memory footprint, and it grows with the
+/// input: one entry per read, held until the run ends. What it holds
+/// therefore matters at a scale nothing else here does. An earlier version
+/// mapped each hash to the source path and record index where it was first
+/// seen, so that a duplicate could be reported precisely -- 154 bytes per
+/// read once the per-record `PathBuf` allocation and the table's growth
+/// spikes were counted, or 42 GB for a 30x bovine WGS sample. A bare
+/// `HashSet` of hashes costs about 10 bytes per read, and the first-seen
+/// position is recovered by re-reading the inputs at the moment a repeat is
+/// found -- see `locate_first`.
+type SeenIds = HashSet<u64, BuildIdHasher>;
 
-fn check_duplicate(seen: &mut SeenIds, id: &str, path: &Path, local_idx: u64) -> Result<()> {
-    let h = fnv1a(id.as_bytes());
-    if let Some((prev_path, prev_idx)) = seen.insert(h, (path.to_path_buf(), local_idx)) {
-        bail!(
+/// Where `id` first appears across `sources`: which source, by position in
+/// the list, and which record within it (0-based).
+///
+/// Re-reading the inputs is only ever done once a hash repeat has been found,
+/// which on real data means the command is about to stop. Paying for it there
+/// buys two things: the error can still name the first occurrence even though
+/// only hashes are kept, and a 64-bit collision between two genuinely
+/// different IDs becomes distinguishable from a real duplicate rather than
+/// aborting a correct run.
+///
+/// `None` means the answer is unavailable -- one of the inputs is stdin and
+/// cannot be read a second time -- or that the ID was not found at all.
+fn locate_first(sources: &[PathBuf], id: &str) -> Result<Option<(usize, u64)>> {
+    if sources.iter().any(|p| is_stdio(p)) {
+        return Ok(None);
+    }
+    for (source_idx, path) in sources.iter().enumerate() {
+        let rx = spawn_reader(path.clone())?;
+        for (local_idx, r) in (0_u64..).zip(rx.iter()) {
+            if r?.base_id() == id {
+                return Ok(Some((source_idx, local_idx)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn check_duplicate(
+    seen: &mut SeenIds,
+    sources: &[PathBuf],
+    source_idx: usize,
+    id: &str,
+    local_idx: u64,
+) -> Result<()> {
+    if seen.insert(fnv1a(id.as_bytes())) {
+        return Ok(());
+    }
+    match locate_first(sources, id)? {
+        // The only record carrying this ID is the one in hand, so nothing was
+        // actually repeated: two different IDs hashed to the same u64.
+        // Astronomically rare, and not a reason to fail a good run.
+        Some(first) if first == (source_idx, local_idx) => {
+            log::debug!(
+                "hash collision on read ID {id:?} at record #{}; not a duplicate",
+                local_idx + 1
+            );
+            Ok(())
+        }
+        Some((first_src, first_idx)) => bail!(
             "duplicate read ID {id:?}: first seen in {} (record #{}), again in {} (record #{}) -- \
              did you accidentally include the same file twice? pass --allow-duplicate-ids to skip this check",
-            prev_path.display(),
-            prev_idx + 1,
-            display(path),
+            display(&sources[first_src]),
+            first_idx + 1,
+            display(&sources[source_idx]),
             local_idx + 1
-        );
+        ),
+        None => bail!(
+            "duplicate read ID {id:?}: seen again in {} (record #{}), having already appeared \
+             earlier in the inputs -- the earlier position can't be reported because stdin \
+             cannot be re-read. Did you accidentally include the same file twice? \
+             pass --allow-duplicate-ids to skip this check",
+            display(&sources[source_idx]),
+            local_idx + 1
+        ),
     }
-    Ok(())
 }
 
 fn run_se(args: &CatArgs, opts: OutputOpts) -> Result<()> {
     let start = Instant::now();
     let mut writer = open_block_writer(&args.out1, opts)?;
-    let mut seen = SeenIds::new();
+    let mut seen = SeenIds::default();
     let check_ids = !args.allow_duplicate_ids;
     let mut total: u64 = 0;
 
@@ -144,7 +205,7 @@ fn run_se(args: &CatArgs, opts: OutputOpts) -> Result<()> {
             for r in rx.iter().take(args.chunk_records) {
                 let rec = r?;
                 if check_ids {
-                    check_duplicate(&mut seen, rec.base_id(), path, local_idx)?;
+                    check_duplicate(&mut seen, &args.r1, file_idx, rec.base_id(), local_idx)?;
                 }
                 chunk.push(rec);
                 local_idx += 1;
@@ -169,6 +230,8 @@ fn run_se(args: &CatArgs, opts: OutputOpts) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 fn cat_one_pe_source(
+    sources: &[PathBuf],
+    source_idx: usize,
     r1_path: &Path,
     r2_path: &Path,
     w1: &mut BlockWriter,
@@ -198,7 +261,7 @@ fn cat_one_pe_source(
                         );
                     }
                     if check_ids {
-                        check_duplicate(seen, r1.base_id(), r1_path, local_idx)?;
+                        check_duplicate(seen, sources, source_idx, r1.base_id(), local_idx)?;
                     }
                     chunk.push((r1, r2));
                     local_idx += 1;
@@ -227,7 +290,7 @@ fn run_pe(args: &CatArgs, opts: OutputOpts) -> Result<()> {
     let start = Instant::now();
     let mut w1 = open_block_writer(&args.out1, opts)?;
     let mut w2 = open_block_writer(args.out2.as_ref().expect("checked by run()"), opts)?;
-    let mut seen = SeenIds::new();
+    let mut seen = SeenIds::default();
     let check_ids = !args.allow_duplicate_ids;
     let mut total: u64 = 0;
 
@@ -240,6 +303,8 @@ fn run_pe(args: &CatArgs, opts: OutputOpts) -> Result<()> {
             r2_path.display()
         );
         total += cat_one_pe_source(
+            &args.r1,
+            file_idx,
             r1_path,
             r2_path,
             &mut w1,

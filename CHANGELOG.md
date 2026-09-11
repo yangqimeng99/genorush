@@ -65,6 +65,28 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`fastx cat`'s duplicate check no longer keeps a path per read.** It kept
+  `HashMap<u64, (PathBuf, u64)>` so the error could name where an ID was
+  first seen, which meant a `to_path_buf()` allocation for every read, all of
+  them retained. Measured on 2,000,000 reads, the check cost 154 bytes per
+  read over the same run with `--allow-duplicate-ids` -- about 42 GB
+  extrapolated to a 30x bovine WGS sample, on a machine where that is an OOM
+  rather than a slow run. Keeping only the hashes in a `HashSet<u64>` brings
+  it to 28 bytes per read (~7.4 GB extrapolated) and makes the check faster
+  as well: 0.92 s versus 1.05 s on that fixture, against a 0.84 s floor with
+  the check off. The gain is the lost allocation, a much smaller table, and
+  hashing each key once -- the new `common::hash::BuildIdHasher` takes the
+  FNV value as given instead of running SipHash over it again, applying
+  splitmix64's finalizer so the table still sees well-distributed bits.
+- The first-seen position is recovered by re-reading the inputs when a
+  repeat is found, a pass only ever taken when the command is about to stop.
+  It also makes the check exact: a 64-bit FNV collision between two
+  different IDs used to abort the run, and is now told apart from a real
+  duplicate and allowed through. When the inputs cannot be re-read (one is
+  stdin), the duplicate is still reported, without the earlier position.
+- `fastx cat` reports record positions 1-based, like every other command.
+  They came from a 0-based index and were printed raw, so a user told
+  "record #1" would go and look at the second record.
 - `io_utils::open_reader` detects gzip by *peeking* the first two bytes
   (`BufRead::fill_buf`) instead of reading and seeking back. A pipe cannot
   seek, and peeking works identically on files, so there is one code path

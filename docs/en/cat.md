@@ -24,9 +24,8 @@ As each source file streams through, every record's
 `FastqRecord::base_id()` is hashed (`common::hash::fnv1a`, the same
 function `fastx deinterleave` uses for layout detection — see
 `docs/en/interleave.md` for why a hash instead of the full ID string) and
-looked up in a running `HashMap<u64, (PathBuf, u64)>` keyed by that hash,
-storing the source file and local record index where it was first seen. A
-second occurrence of the same hash is reported immediately:
+looked up in a running `HashSet<u64>` of everything seen so far. A second
+occurrence of the same hash is reported immediately:
 
 ```
 duplicate read ID "...": first seen in run1_R1.fq.gz (record #412),
@@ -40,6 +39,60 @@ clean up, and the specific files/positions in the message are exactly what
 someone would need to go fix their file list. `--allow-duplicate-ids`
 disables the check for cases where it's a false positive (a platform that
 doesn't guarantee globally unique IDs).
+
+## What the set holds, and why it holds so little
+
+This set is the command's entire memory footprint, and it is the one thing
+here that grows with the input: one entry per read, kept until the run ends.
+At the scale this tool is aimed at, what goes in each entry is not a detail.
+
+An earlier version stored, per hash, the source path and record index where
+it was first seen, so the error above could name both ends of a collision.
+That is `HashMap<u64, (PathBuf, u64)>` — and a `path.to_path_buf()` heap
+allocation *per read*, every one of which stays in the table. Measured on
+2,000,000 reads, the check added 294 MiB over the same run with
+`--allow-duplicate-ids`: **154 bytes per read**, once the table's 40-byte
+entries, those allocations, and the transient doubling during a resize are
+all counted. A 30x bovine WGS sample is around 270 million pairs, which puts
+that at roughly 42 GB — on a shared machine, a job that dies hours in, after
+writing most of its output.
+
+Keeping only the hashes brings it to **28 bytes per read** measured the same
+way (about 7.4 GB extrapolated), and made the check *faster*, not slower:
+
+| | wall clock | peak RSS | check's own cost |
+|---|---|---|---|
+| `--allow-duplicate-ids` | 0.84 s | 42 MiB | — |
+| storing paths and positions | 1.05 s | 336 MiB | 154 B/read, +25% time |
+| hashes only | 0.92 s | 95 MiB | 28 B/read, +10% time |
+
+Three things account for the speedup: the per-read allocation is gone, a
+table a third the size keeps far more of itself in cache, and the keys are
+hashed once instead of twice — `common::hash::BuildIdHasher` takes the FNV
+value as given rather than running SipHash over it again, applying only
+splitmix64's finalizer so the table still sees well-distributed bits (FNV's
+low bits, which decide the bucket, are its weakest).
+
+The 28 bytes are mostly not the entries themselves. A `HashSet<u64>` entry
+is 8 bytes plus a 1-byte control tag, but capacity is a power of two held
+below 7/8 full, and a resize briefly holds the old table alongside the new
+one — the peak lands at roughly twice the steady state.
+
+## Recovering the first occurrence
+
+Storing only hashes costs the error message its "first seen in ... (record
+#N)" half, so that half is recovered on demand: when a repeated hash turns
+up, `locate_first` re-reads the inputs to find where the ID actually first
+appeared. That pass is only ever taken once a repeat has been found, which
+on real data means the command is about to stop anyway.
+
+It also makes the check *exact*. FNV-1a is 64 bits and not
+collision-proof, and the old version would abort on a collision between two
+genuinely different IDs. The rescan distinguishes the two cases: if the only
+record carrying that ID is the one in hand, nothing was repeated, and the run
+continues (logged at debug level). Where the rescan is impossible — one of
+the inputs is stdin, which cannot be read twice — the command reports the
+duplicate without the earlier position and says why.
 
 ## Paired-end mode checks two things at once
 
