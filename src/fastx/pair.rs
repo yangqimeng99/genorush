@@ -453,8 +453,12 @@ impl TempDir {
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
         let path = parent.join(format!("genorush-pair-{}-{}", std::process::id(), nanos));
-        std::fs::create_dir_all(&path)
-            .with_context(|| format!("failed to create spill directory {}", path.display()))?;
+        std::fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "could not create a spill directory at {} -- check --temp-dir",
+                path.display()
+            )
+        })?;
         Ok(Self { path })
     }
 }
@@ -579,7 +583,13 @@ fn discard(path: &Path) {
 /// the unpaired remainder is ever written, and it is compressed the same way
 /// the inputs are. Overshooting is the right direction: running out of space
 /// halfway through leaves a half-written join and no answer.
-fn ensure_space_for_spill(temp_root: &Path, inputs: &[&Path]) -> Result<()> {
+///
+/// `dir` must already exist. Asking about a path that does not is not a
+/// portable way to find that out: POSIX `statvfs` reports `ENOENT`, while
+/// Windows resolves any syntactically valid path to its volume root and
+/// answers about the volume, so the check would pass for a directory that
+/// cannot be created. Creating the directory first settles it on both.
+fn ensure_space_for_spill(dir: &Path, inputs: &[&Path]) -> Result<()> {
     let mut need: u64 = 0;
     for p in inputs {
         if !is_stdio(p) {
@@ -587,10 +597,10 @@ fn ensure_space_for_spill(temp_root: &Path, inputs: &[&Path]) -> Result<()> {
         }
     }
     let need = need + need / 10; // a little headroom for framing and rounding
-    let available = fs4::available_space(temp_root).with_context(|| {
+    let available = fs4::available_space(dir).with_context(|| {
         format!(
-            "could not check free space on {} (use --temp-dir to point somewhere else)",
-            temp_root.display()
+            "could not check free space on {} -- point --temp-dir somewhere else",
+            dir.display()
         )
     })?;
     ensure!(
@@ -598,7 +608,7 @@ fn ensure_space_for_spill(temp_root: &Path, inputs: &[&Path]) -> Result<()> {
         "not enough space to spill: {} needs about {:.1} GiB free but has {:.1} GiB. \
          Point --temp-dir at a filesystem with room, or raise --max-memory so the join \
          stays in memory.",
-        temp_root.display(),
+        dir.display(),
         need as f64 / (1024.0 * 1024.0 * 1024.0),
         available as f64 / (1024.0 * 1024.0 * 1024.0)
     );
@@ -632,8 +642,11 @@ fn spill_and_join(
     budget: u64,
     k: usize,
 ) -> Result<JoinStats> {
-    ensure_space_for_spill(temp_root, &inputs)?;
+    // Creating the directory comes first: it proves the destination exists
+    // and is writable, which the space check cannot portably establish on its
+    // own. If there turns out not to be room, the guard removes it again.
     let dir = TempDir::create(temp_root)?;
+    ensure_space_for_spill(&dir.path, &inputs)?;
     log::info!(
         "spilling to {} across {k} partitions per side",
         dir.path.display()

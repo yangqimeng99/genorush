@@ -251,6 +251,12 @@ fn a_temp_dir_that_cannot_be_used_is_reported_before_anything_spills() {
     let f1 = mate_file(&dir, "R1.fq", &fx.r1, 1);
     let f2 = mate_file(&dir, "R2rev.fq", &fx.r2, 2);
 
+    // A path that simply does not exist is not unusable -- the spill
+    // directory is created with its parents. What cannot work is a parent
+    // that is a file, which fails the same way on every platform.
+    let blocker = dir.join("not-a-directory");
+    write(&blocker, b"this is a regular file\n");
+
     let out = run(&[
         "fastx",
         "pair",
@@ -265,9 +271,11 @@ fn a_temp_dir_that_cannot_be_used_is_reported_before_anything_spills() {
         "--max-memory",
         "8K",
         "--temp-dir",
-        dir.join("no/such/place").to_str().unwrap(),
+        blocker.join("under-a-file").to_str().unwrap(),
     ]);
-    assert_refused(&out, "free space");
+    // Not "no free space": a missing directory has to be reported as such on
+    // both platforms, and only creating it settles that portably.
+    assert_refused(&out, "--temp-dir");
 }
 
 #[test]

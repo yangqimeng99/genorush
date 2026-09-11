@@ -106,11 +106,25 @@ The spill directory is created inside `--temp-dir` (default: the working
 directory) and removed when the run ends, including on the error paths, via a
 guard that runs on scope exit.
 
-Before anything is written, free space is checked against the on-disk size of
-the inputs plus 10%. That overshoots — only the unpaired remainder is ever
-spilled, compressed the way the inputs are — and overshooting is the right
-direction: running out of space halfway through a join leaves no answer and a
-directory full of partitions.
+The directory is created before the free-space check, not after, and that
+order is not incidental. Asking about a path that does not exist is not a
+portable way to learn that it is unusable: POSIX `statvfs` reports `ENOENT`,
+while Windows resolves any syntactically valid path to its volume root and
+cheerfully answers about the volume. Creating the directory settles both
+questions — does it exist, can we write there — on every platform, and the
+guard removes it again if the space check then fails.
+
+Free space is checked against the on-disk size of the inputs plus 10%. That
+overshoots — only the unpaired remainder is ever spilled, compressed the way
+the inputs are — and overshooting is the right direction: running out of
+space halfway through a join leaves no answer and a directory full of
+partitions.
+
+One more platform difference shapes the join itself: Unix lets a file be
+unlinked while it is still open, Windows does not. Partition files are
+deleted as the join consumes them, so every writer and reader on a partition
+has to be closed before its turn comes -- `Partitions::finish` consumes
+itself to drop the writers, and each read phase is scoped.
 
 ## Validated behavior
 
