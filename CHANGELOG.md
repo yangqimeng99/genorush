@@ -7,6 +7,19 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **stdin/stdout support across every command**: any input or output path
+  may be `-`. Compressed input needs no flag (gzip is recognised from the
+  data, so a pipe carrying `.gz` bytes works), while compressed output on a
+  pipe has no extension to infer from and is requested with the new global
+  `-z/--gzip`, which forces gzip regardless of the output path. File
+  outputs are unaffected: a `.gz` path still compresses on its own, and
+  every existing invocation behaves exactly as before.
+- Refusal of the two stdio combinations that cannot work: more than one
+  input given as `-` (each would get an arbitrary half of the same stdin)
+  and more than one output given as `-` (two record streams interleaved
+  into one pipe). Both used to be expressible and would have produced
+  plausible-looking garbage.
+
 - **`fastx deinterleave --layout by-suffix`**: routes every record by the
   `/1` or `/2` marker in its own header, ignoring position entirely. This
   covers merged files that are neither interleaved nor a two-half
@@ -34,6 +47,25 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `io_utils::open_reader` detects gzip by *peeking* the first two bytes
+  (`BufRead::fill_buf`) instead of reading and seeking back. A pipe cannot
+  seek, and peeking works identically on files, so there is one code path
+  rather than two. `BlockWriter` now holds a boxed `Write` so the same
+  batching and parallel compression serve files and stdout alike; blocks are
+  hundreds of KB and up, so the one dynamic call per block is not
+  measurable. Benchmarked against the previous build on file-to-file work
+  (rename plain and gzip, sample at two rates, rescue, deinterleave):
+  every case within ±1% on best-of-9 timings, with byte-identical output.
+- **`fastx deinterleave --layout auto` reads the input once**, on a pipe or
+  a file. The probe used to re-open the input and start over; the records it
+  consumed are now replayed from a small buffer into the same stream. The
+  layouts that genuinely need two passes (`--layout concat`, and `auto`'s
+  fallback scan when the head is inconclusive) are refused on stdin with a
+  message naming the single-pass alternatives.
+- A downstream that stops reading (`... -o - | head`) now ends the run
+  cleanly instead of surfacing `BrokenPipe` as a command failure, which
+  would otherwise trip `set -o pipefail` in any wrapping script. Every
+  other error keeps its previous message and non-zero exit.
 - **`fastx deinterleave --layout auto` now probes the head of the file**
   (4096 records) to choose a strategy, instead of always reading the entire
   input to hash every `base_id()` into memory first. That scan cost 5

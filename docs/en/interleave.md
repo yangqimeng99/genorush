@@ -103,6 +103,30 @@ first pass that only counts records — cheaper than the hash scan, but still
 a real pre-pass, because the midpoint is unavoidably a function of the whole
 file's length.
 
+## Probing a stream you can't rewind
+
+The probe reads records, and those records are still part of the input. An
+earlier version simply re-opened the file and started over, which is free
+enough on a file and impossible on a pipe.
+
+Instead, the probed records are buffered (4096 of them, a few MB at most)
+and handed back to the front of the stream: `Records` yields its replay
+buffer before touching the channel again, so the splitter sees byte-for-byte
+the same sequence of records it would have seen from a fresh read. This
+makes `--layout auto` work on stdin, and removes the second open in the file
+case as a side effect.
+
+What the replay can't rescue is a layout that needs the *whole* input before
+it can start:
+
+- `--layout concat` needs the record count to locate the midpoint.
+- `--layout auto` falls back to the hash-everything scan when the head is
+  inconclusive, then splits.
+
+Both read the input twice, so both are refused on stdin with a message
+naming the single-pass alternatives (`interleaved`, `by-suffix`) rather than
+consuming half the stream and failing somewhere less legible.
+
 ## Routing by header marker (`--layout by-suffix`)
 
 `FastqRecord::mate_suffix()` scans the *entire* header for `/1` or `/2`

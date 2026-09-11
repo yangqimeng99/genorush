@@ -46,6 +46,44 @@ genorush <category> <action> [options]
 Every subcommand accepts a global `-j/--threads` flag (default: `1`; pass
 `0` to use all logical cores).
 
+### Pipes
+
+Every input and output accepts `-` for stdin/stdout, so commands compose
+with the rest of a pipeline:
+
+```bash
+# read a merged FASTQ off a pipe
+zcat merged.fq.gz | genorush fastx deinterleave -i - -o R1.fq.gz -O R2.fq.gz
+
+# hand sampled reads straight to an aligner, no temporary file
+genorush fastx sample -i reads.fq.gz -p 0.1 -s 42 -o - | bwa mem ref.fa -
+
+# both ends piped, with the output gzip-compressed
+cat genome.fa | genorush fastx rename - -n map.tsv -o - -z > renamed.fa.gz
+```
+
+Compressed *input* needs no flag: gzip is recognised from the data itself,
+so a pipe carrying `.gz` bytes just works. Compressed *output* can't be
+inferred the same way — a pipe has no `.gz` extension to inspect — so
+`-z/--gzip` is how a pipeline asks for it. For file outputs nothing
+changes: a path ending in `.gz` is still compressed on its own.
+
+Two consequences of there being exactly one stdin and one stdout:
+
+- At most one input per command may be `-`, and at most one output. Two
+  inputs reading the same stdin would each get an arbitrary half of it; two
+  outputs sharing one pipe would interleave two record streams. Both are
+  rejected rather than silently producing plausible garbage.
+- `fastx deinterleave` needs to read its input twice for `--layout concat`
+  (to find the midpoint) and for `--layout auto` when the head of the file
+  is inconclusive. A pipe can only be read once, so those combinations are
+  refused with a message pointing at the single-pass layouts
+  (`--layout interleaved`, `--layout by-suffix`). Everything else, this
+  command included, is single-pass and pipes fine.
+
+A downstream that stops reading (`... -o - | head`) ends the run cleanly
+rather than reporting a broken-pipe failure.
+
 ### `fastx rename` / `gff rename`
 
 ```bash

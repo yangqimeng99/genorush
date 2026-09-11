@@ -44,6 +44,38 @@ genorush <类别> <动作> [选项]
 
 所有子命令都支持全局参数 `-j/--threads`（默认 `1`；传 `0` 表示使用全部逻辑核心）。
 
+### 管道
+
+所有输入和输出都接受 `-` 表示 stdin/stdout，可以直接嵌进现有流程：
+
+```bash
+# 从管道读入合并过的 FASTQ
+zcat merged.fq.gz | genorush fastx deinterleave -i - -o R1.fq.gz -O R2.fq.gz
+
+# 抽样结果直接喂给比对软件，不落临时文件
+genorush fastx sample -i reads.fq.gz -p 0.1 -s 42 -o - | bwa mem ref.fa -
+
+# 两端都走管道，并把输出压缩
+cat genome.fa | genorush fastx rename - -n map.tsv -o - -z > renamed.fa.gz
+```
+
+压缩**输入**不需要任何参数：gzip 是从数据本身识别的，所以管道里流的是 `.gz`
+字节也能直接处理。压缩**输出**没法同样推断——管道没有 `.gz` 扩展名可看——所以
+用 `-z/--gzip` 来明确要求。写文件时行为完全不变：路径以 `.gz` 结尾照样会压缩。
+
+由于 stdin 和 stdout 各只有一个，有两条推论：
+
+- 每个命令**最多只能有一个输入**写成 `-`，输出同理。两个输入读同一个 stdin
+  会各自拿到随意的一半；两个输出挤进同一个管道会把两股记录流交织在一起。
+  这两种情况都会直接报错，而不是悄悄产出看起来正常的垃圾。
+- `fastx deinterleave` 在 `--layout concat`（要先找中点）以及 `--layout auto`
+  头部探测不出结论时，需要把输入读两遍。管道只能读一遍，所以这些组合会被拒绝，
+  并提示改用单遍的布局（`--layout interleaved`、`--layout by-suffix`）。
+  除此之外的所有场景（包括这个命令本身）都是单遍的，可以正常走管道。
+
+下游提前停止读取（`... -o - | head`）会让本次运行正常结束，而不是报
+broken pipe 错误。
+
 ### `fastx rename` / `gff rename`
 
 ```bash
