@@ -1,3 +1,4 @@
+mod check;
 mod common;
 mod fastx;
 mod gff;
@@ -47,6 +48,7 @@ struct Cli {
 enum TopCommand {
     Fastx(fastx::FastxCli),
     Gff(gff::GffCli),
+    Check(check::CheckCli),
 }
 
 /// True if the failure is really "the process on the other end of our stdout
@@ -86,6 +88,7 @@ fn main() -> std::process::ExitCode {
     let result = match cli.command {
         TopCommand::Fastx(c) => fastx::run(c, opts),
         TopCommand::Gff(c) => gff::run(c, opts),
+        TopCommand::Check(c) => check::run(c, opts),
     };
 
     match result {

@@ -42,6 +42,7 @@ genorush <category> <action> [options]
 | `fastx`  | `interleave` | Merge R1/R2 into a single standard interleaved FASTQ |
 | `fastx`  | `deinterleave` | Split a merged FASTQ back into R1/R2, by position (interleaved or R1-then-R2 concatenated) or by the `/1`+`/2` header markers |
 | `fastx`  | `cat` | Concatenate FASTQ from repeated sequencing runs, checking for duplicate read IDs |
+| `check`  | `contigs` | Compare the contigs several files describe — FASTA/`.fai`, VCF, BCF, SAM, BAM, CRAM, GFF, BED |
 | `fastx`  | `pair` | Match up two mate files that have drifted out of sync, in memory proportional to the drift |
 
 Every subcommand accepts a global `-j/--threads` flag (default: `1`; pass
@@ -221,6 +222,35 @@ probes the head of the file to pick a strategy, and whichever splitter runs
 re-checks its assumption on every record as it writes. See
 [`docs/en/interleave.md`](docs/en/interleave.md) for the detection
 algorithm and the trade-offs.
+
+### `check contigs`
+
+```bash
+genorush check contigs ref.fa.fai calls.vcf.gz aln.bam genes.gff3
+```
+
+```
+file          kind    contigs  lengths
+ref.fa.fai    sizes        30  yes   (reference)
+calls.vcf.gz  VCF          30  yes
+aln.bam       BAM          31  yes
+genes.gff3    GFF          30  no
+
+  aln.bam: 1 contig(s) the reference does not have
+      chrMT -- the reference calls it "MT"
+```
+
+A BAM whose contigs are `1, 2, 3` and a VCF whose contigs are `chr1, chr2,
+chr3` are both valid files. Tools that join them rarely crash — they find
+nothing for the contigs they cannot match and report it as zero, which looks
+exactly like a real answer. Lengths differing by a few bases are worse: every
+coordinate past that point is wrong and nothing says so.
+
+The first file is the reference; the rest are checked against it. Unknown
+names and conflicting lengths fail; a different order is a remark until
+`--require-order`; contigs a file simply doesn't mention are normal. Only
+headers and indexes are read, so this is fast even on whole genomes. See
+[`docs/en/contigs.md`](docs/en/contigs.md).
 
 ### `fastx pair`
 

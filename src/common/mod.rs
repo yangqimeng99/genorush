@@ -1,3 +1,4 @@
+pub mod contigs;
 pub mod fastq;
 pub mod hash;
 pub mod rename;

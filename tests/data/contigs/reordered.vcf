@@ -1,0 +1,5 @@
+##fileformat=VCFv4.2
+##contig=<ID=2,length=1500>
+##contig=<ID=1,length=2000>
+##contig=<ID=MT,length=300>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO

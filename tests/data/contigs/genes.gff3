@@ -1,0 +1,4 @@
+##gff-version 3
+##sequence-region 1 1 2000
+##sequence-region 2 1 1500
+1	src	gene	1	100	.	+	.	ID=g1

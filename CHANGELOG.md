@@ -7,6 +7,27 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`check contigs`**: compares the contigs several files describe, against
+  the first of them. A BAM whose contigs are `1, 2, 3` and a VCF whose contigs
+  are `chr1, chr2, chr3` are both valid files; tools that join them rarely
+  crash, they just find nothing for the contigs they cannot match and report
+  it as zero. Unknown names and conflicting lengths fail -- with the naming
+  convention named where it can be told, since `chr1 -- the reference calls it
+  "1"` is a fix and "not found" is a hunt. A different order is a remark until
+  `--require-order`; contigs a file simply does not mention are normal, unless
+  that file also used names the reference lacks.
+
+  Reads FASTA/`.fai`, VCF, BCF, SAM, BAM, CRAM, GFF/GTF and BED, headers and
+  indexes only, so it is fast on whole genomes. Tested against fixtures
+  written by samtools and bcftools rather than by hand.
+  See `docs/en/contigs.md` / `docs/zh/contigs.md`.
+- **`common::contigs`**, the format-reading layer this project has not had
+  until now, and the first place it uses `noodles`. VCF, BCF, SAM, BAM and
+  CRAM headers are read with `noodles-{vcf,bcf,sam,bam,cram}`; `.fai`,
+  `.chrom.sizes`, FASTA, GFF and BED are read directly, because their contig
+  names are the first column of a text file and a version-coupled parser for
+  `split('\t').next()` would be a cost without a benefit. Adding the five
+  crates and using them costs about 0.31 MB of binary (2.19 -> 2.50 MB).
 - **`-b/--bgzf`**: writes BGZF rather than ordinary gzip, for any command and
   any output. BGZF is gzip -- anything that reads `.gz` reads it -- but
   written so it can be indexed: members bounded at 64 KiB that record their

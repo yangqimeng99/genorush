@@ -41,6 +41,7 @@ genorush <类别> <动作> [选项]
 | `fastx`   | `interleave`   | 把 R1/R2 合并成一个标准 interleaved FASTQ |
 | `fastx`   | `deinterleave` | 把合并过的 FASTQ 拆回 R1/R2：按位置（interleaved 或 cat 拼接），或按 header 里的 `/1`、`/2` 标记 |
 | `fastx`   | `cat`      | 合并多次测序的 FASTQ 文件，同时校验有没有重复的 read ID |
+| `check`   | `contigs`  | 比对多个文件描述的 contig 是否一致——FASTA/`.fai`、VCF、BCF、SAM、BAM、CRAM、GFF、BED |
 | `fastx`   | `pair`     | 把失步的两个 mate 文件重新配对，内存只与失步程度成正比 |
 
 所有子命令都支持全局参数 `-j/--threads`（默认 `1`；传 `0` 表示使用全部逻辑核心）。
@@ -197,6 +198,32 @@ genorush fastx deinterleave -i merged.fq.gz --layout interleaved \
 能把它们分开。`--layout auto` 会探测文件头部来选择策略，而无论最终走哪个
 拆分函数，它都会在写出的过程中逐条复核自己的假设。检测算法与相关取舍见
 [`docs/zh/interleave.md`](docs/zh/interleave.md)。
+
+### `check contigs`
+
+```bash
+genorush check contigs ref.fa.fai calls.vcf.gz aln.bam genes.gff3
+```
+
+```
+file          kind    contigs  lengths
+ref.fa.fai    sizes        30  yes   (reference)
+calls.vcf.gz  VCF          30  yes
+aln.bam       BAM          31  yes
+genes.gff3    GFF          30  no
+
+  aln.bam: 1 contig(s) the reference does not have
+      chrMT -- the reference calls it "MT"
+```
+
+一个 contig 叫 `1, 2, 3` 的 BAM 和一个叫 `chr1, chr2, chr3` 的 VCF，两个文件都
+合法。把它们放一起用的工具很少会崩——它只是在匹配不上的 contig 上什么都找不到，
+然后报成 0，看起来和真实结果一样。长度差几个碱基更糟：从那里往后所有坐标都是
+错的，而没有任何东西会说。
+
+第一个文件是基准，其余与它比对。名字对不上和长度冲突会失败；顺序不同在
+`--require-order` 之前只是提示；文件没提到的 contig 属正常。只读头部和索引，
+所以在全基因组规模上也很快。详见 [`docs/zh/contigs.md`](docs/zh/contigs.md)。
 
 ### `fastx pair`
 
