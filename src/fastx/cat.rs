@@ -102,18 +102,21 @@ pub fn run(args: CatArgs, opts: OutputOpts) -> Result<()> {
     }
 }
 
-/// Records the source file + local record index where a hash was first
-/// seen, so a duplicate hit can report exactly what to go check.
+/// Records the source file + local record index (0-based) where a hash was
+/// first seen, so a duplicate hit can report exactly what to go check.
+/// Positions are reported 1-based, matching every other command's errors.
 type SeenIds = HashMap<u64, (PathBuf, u64)>;
 
 fn check_duplicate(seen: &mut SeenIds, id: &str, path: &Path, local_idx: u64) -> Result<()> {
     let h = fnv1a(id.as_bytes());
     if let Some((prev_path, prev_idx)) = seen.insert(h, (path.to_path_buf(), local_idx)) {
         bail!(
-            "duplicate read ID {id:?}: first seen in {} (record #{prev_idx}), again in {} (record #{local_idx}) -- \
+            "duplicate read ID {id:?}: first seen in {} (record #{}), again in {} (record #{}) -- \
              did you accidentally include the same file twice? pass --allow-duplicate-ids to skip this check",
             prev_path.display(),
-            display(path)
+            prev_idx + 1,
+            display(path),
+            local_idx + 1
         );
     }
     Ok(())
@@ -185,10 +188,11 @@ fn cat_one_pe_source(
                 PairStep::Pair { r1, r2, ids_match } => {
                     if !ids_match {
                         bail!(
-                            "within source pair {} + {}, read 1/2 desync at local pair #{local_idx}: \
+                            "within source pair {} + {}, read 1/2 desync at local pair #{}: \
                              IDs {:?} vs {:?} do not match",
                             r1_path.display(),
                             r2_path.display(),
+                            local_idx + 1,
                             r1.base_id(),
                             r2.base_id()
                         );
@@ -254,4 +258,268 @@ fn run_pe(args: &CatArgs, opts: OutputOpts) -> Result<()> {
         start.elapsed()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::testutil::{headers_of, scratch_path as scratch, write_fastq};
+
+    /// Builds the arguments a command line would have produced. `chunk_records`
+    /// is deliberately tiny so multi-chunk paths are exercised by fixtures of
+    /// a handful of records.
+    fn args(
+        r1: Vec<PathBuf>,
+        r2: Vec<PathBuf>,
+        out1: PathBuf,
+        out2: Option<PathBuf>,
+        allow_duplicate_ids: bool,
+    ) -> CatArgs {
+        CatArgs {
+            r1,
+            r2,
+            out1,
+            out2,
+            allow_duplicate_ids,
+            chunk_records: 3,
+        }
+    }
+
+    fn source(name: &str, headers: &[&str]) -> PathBuf {
+        let p = scratch(name);
+        write_fastq(&p, headers);
+        p
+    }
+
+    // ---- single-end ----
+
+    #[test]
+    fn distinct_sources_concatenate_in_order() {
+        let a = source("run1", &["@a1/1", "@a2/1", "@a3/1", "@a4/1"]);
+        let b = source("run2", &["@b1/1", "@b2/1"]);
+        let out = scratch("out");
+
+        run(
+            args(vec![a, b], vec![], out.clone(), None, false),
+            OutputOpts::default(),
+        )
+        .expect("distinct sources should concatenate");
+
+        assert_eq!(
+            headers_of(&out),
+            ["@a1/1", "@a2/1", "@a3/1", "@a4/1", "@b1/1", "@b2/1"]
+        );
+    }
+
+    #[test]
+    fn a_duplicate_id_across_sources_is_rejected() {
+        let a = source("dup_a", &["@x1/1", "@x2/1", "@x3/1"]);
+        let b = source("dup_b", &["@y1/1", "@y2/1", "@x2/1"]);
+        let out = scratch("out");
+
+        let err = run(
+            args(vec![a.clone(), b.clone()], vec![], out, None, false),
+            OutputOpts::default(),
+        )
+        .expect_err("a repeated read ID must stop the run");
+        let msg = err.to_string();
+
+        assert!(msg.contains("duplicate read ID"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("x2"),
+            "the offending ID should be named: {msg}"
+        );
+        // Both ends of the collision have to be reportable, or the user has
+        // no way to tell which input to go and look at.
+        assert!(
+            msg.contains(a.to_str().unwrap()) && msg.contains(b.to_str().unwrap()),
+            "both source files should be named: {msg}"
+        );
+        // 1-based, and the two ends really are at different positions:
+        // second record of the first file, third of the second.
+        assert!(
+            msg.contains("record #2") && msg.contains("record #3"),
+            "positions should be reported 1-based and distinctly: {msg}"
+        );
+        assert!(
+            msg.contains("--allow-duplicate-ids"),
+            "the error should name the escape hatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_same_file_listed_twice_is_rejected() {
+        // The realistic operator error this check exists for: a typo'd path
+        // or a glob that matched more than intended, silently doubling
+        // coverage.
+        let a = source("twice", &["@r1/1", "@r2/1"]);
+        let out = scratch("out");
+
+        let err = run(
+            args(vec![a.clone(), a], vec![], out, None, false),
+            OutputOpts::default(),
+        )
+        .expect_err("the same file twice must stop the run");
+        assert!(
+            err.to_string()
+                .contains("did you accidentally include the same file twice"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_within_one_source_is_rejected() {
+        let a = source("self_dup", &["@r1/1", "@r2/1", "@r1/1"]);
+        let out = scratch("out");
+
+        let err = run(
+            args(vec![a], vec![], out, None, false),
+            OutputOpts::default(),
+        )
+        .expect_err("a file that repeats an ID internally must stop the run");
+        assert!(
+            err.to_string().contains("duplicate read ID"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn allow_duplicate_ids_skips_the_check_entirely() {
+        let a = source("allowed", &["@r1/1", "@r2/1"]);
+        let out = scratch("out");
+
+        run(
+            args(vec![a.clone(), a], vec![], out.clone(), None, true),
+            OutputOpts::default(),
+        )
+        .expect("--allow-duplicate-ids should let it through");
+
+        assert_eq!(headers_of(&out), ["@r1/1", "@r2/1", "@r1/1", "@r2/1"]);
+    }
+
+    #[test]
+    fn mate_markers_do_not_make_two_reads_distinct() {
+        // `/1` and `/2` are stripped by base_id(), so a single-end
+        // concatenation of a file with its own mate file is still a duplicate
+        // of every pair id -- which is what catches "I listed R1 and R2 as
+        // two runs of the same mate".
+        let r1 = source("mm_r1", &["@p1/1", "@p2/1"]);
+        let r2 = source("mm_r2", &["@p1/2", "@p2/2"]);
+        let out = scratch("out");
+
+        let err = run(
+            args(vec![r1, r2], vec![], out, None, false),
+            OutputOpts::default(),
+        )
+        .expect_err("R1 and R2 of the same pairs share their IDs");
+        assert!(
+            err.to_string().contains("duplicate read ID"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ---- paired-end ----
+
+    #[test]
+    fn paired_sources_concatenate_both_mates_in_order() {
+        let a1 = source("pe_a1", &["@a1/1", "@a2/1"]);
+        let a2 = source("pe_a2", &["@a1/2", "@a2/2"]);
+        let b1 = source("pe_b1", &["@b1/1", "@b2/1"]);
+        let b2 = source("pe_b2", &["@b1/2", "@b2/2"]);
+        let out1 = scratch("out1");
+        let out2 = scratch("out2");
+
+        run(
+            args(
+                vec![a1, b1],
+                vec![a2, b2],
+                out1.clone(),
+                Some(out2.clone()),
+                false,
+            ),
+            OutputOpts::default(),
+        )
+        .expect("paired sources should concatenate");
+
+        assert_eq!(headers_of(&out1), ["@a1/1", "@a2/1", "@b1/1", "@b2/1"]);
+        assert_eq!(headers_of(&out2), ["@a1/2", "@a2/2", "@b1/2", "@b2/2"]);
+    }
+
+    #[test]
+    fn a_duplicate_pair_id_across_paired_sources_is_rejected() {
+        let a1 = source("pedup_a1", &["@p1/1", "@p2/1"]);
+        let a2 = source("pedup_a2", &["@p1/2", "@p2/2"]);
+        let b1 = source("pedup_b1", &["@p2/1"]);
+        let b2 = source("pedup_b2", &["@p2/2"]);
+        let out1 = scratch("out1");
+        let out2 = scratch("out2");
+
+        let err = run(
+            args(vec![a1, b1], vec![a2, b2], out1, Some(out2), false),
+            OutputOpts::default(),
+        )
+        .expect_err("a repeated pair ID must stop the run");
+        assert!(
+            err.to_string().contains("duplicate read ID"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn desynced_mates_within_one_source_are_rejected() {
+        // Checked per source pair, not just across runs: a single corrupt
+        // run should be caught too.
+        let r1 = source("desync_r1", &["@p1/1", "@p2/1", "@p3/1"]);
+        let r2 = source("desync_r2", &["@p1/2", "@WRONG/2", "@p3/2"]);
+        let out1 = scratch("out1");
+        let out2 = scratch("out2");
+
+        let err = run(
+            args(vec![r1], vec![r2], out1, Some(out2), false),
+            OutputOpts::default(),
+        )
+        .expect_err("mismatched mate IDs must stop the run");
+        assert!(
+            err.to_string().contains("read 1/2 desync"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_mate_count_mismatch_within_one_source_is_rejected() {
+        let r1 = source("count_r1", &["@p1/1", "@p2/1", "@p3/1"]);
+        let r2 = source("count_r2", &["@p1/2", "@p2/2"]);
+        let out1 = scratch("out1");
+        let out2 = scratch("out2");
+
+        let err = run(
+            args(vec![r1], vec![r2], out1, Some(out2), false),
+            OutputOpts::default(),
+        )
+        .expect_err("unequal mate counts must stop the run");
+        assert!(
+            err.to_string().contains("different numbers of reads"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mismatched_numbers_of_r1_and_r2_inputs_are_rejected() {
+        let a1 = source("uneven_a1", &["@a/1"]);
+        let b1 = source("uneven_b1", &["@b/1"]);
+        let a2 = source("uneven_a2", &["@a/2"]);
+        let out1 = scratch("out1");
+        let out2 = scratch("out2");
+
+        let err = run(
+            args(vec![a1, b1], vec![a2], out1, Some(out2), false),
+            OutputOpts::default(),
+        )
+        .expect_err("two --r1 and one --r2 is not a pairing");
+        assert!(
+            err.to_string()
+                .contains("must be given the same number of times"),
+            "unexpected error: {err}"
+        );
+    }
 }

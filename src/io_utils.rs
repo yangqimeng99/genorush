@@ -258,6 +258,7 @@ impl BlockWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::testutil::scratch_path as scratch;
     use std::path::PathBuf;
 
     #[test]
@@ -285,17 +286,6 @@ mod tests {
     fn describes_stdio_without_pretending_it_is_a_file() {
         assert_eq!(display(Path::new("-")), "<stdin/stdout>");
         assert_eq!(display(Path::new("reads.fq")), "reads.fq");
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-scratch");
-        std::fs::create_dir_all(&dir).expect("failed to create test scratch dir");
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        dir.join(format!("{name}.{n}.{}.bin", std::process::id()))
     }
 
     fn round_trip(path: &Path, opts: OutputOpts, payload: &[u8]) -> (bool, Vec<u8>) {

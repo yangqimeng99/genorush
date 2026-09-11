@@ -607,45 +607,7 @@ pub fn run(args: DeinterleaveArgs, opts: OutputOpts) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::fastq::read_fastq_record;
-    use std::fs;
-    use std::io::Cursor;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Test scratch space lives under the build directory rather than the
-    /// system temp dir: it is already git-ignored, it is guaranteed writable
-    /// wherever `cargo` itself can write, and it keeps test artifacts next to
-    /// the build they came from instead of scattered in /tmp.
-    fn scratch(name: &str) -> PathBuf {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-scratch");
-        fs::create_dir_all(&dir).expect("failed to create test scratch dir");
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        dir.join(format!("{name}.{n}.{}.fastq", std::process::id()))
-    }
-
-    fn write_fastq(path: &Path, headers: &[&str]) {
-        let mut body = String::new();
-        for h in headers {
-            body.push_str(&format!("{h}\nACGT\n+\nIIII\n"));
-        }
-        fs::write(path, body).expect("failed to write test fastq");
-    }
-
-    fn headers_of(path: &Path) -> Vec<String> {
-        let body = fs::read_to_string(path).expect("failed to read output");
-        let mut reader = Cursor::new(body.into_bytes());
-        let mut out = Vec::new();
-        let mut line_no = 1;
-        while let Some(rec) = read_fastq_record(&mut reader, line_no).expect("malformed output") {
-            out.push(rec.header);
-            line_no += 4;
-        }
-        out
-    }
+    use crate::common::testutil::{headers_of, scratch_path as scratch, write_fastq};
 
     /// Runs a split over a temporary input and returns the two outputs'
     /// headers, so tests can assert on routing without caring about bodies.
