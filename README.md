@@ -241,6 +241,14 @@ twice) instead of silently doubling coverage. See
   generates itself can be.
 - Every command ships with unit tests for its non-trivial shared logic
   (`cargo test`) and is clippy-clean (`cargo clippy --all-targets`).
+- `tests/cli_pipes.rs` drives the built binary through real pipes, since
+  argument defaults, exit codes and the data/log split only exist at that
+  level. Nearly every case runs a command twice -- once to a file, once
+  through a pipe -- and requires the two results to be byte-identical,
+  because a pipeline that quietly differs from the file-based run is the
+  failure worth catching. The helpers in `tests/common/` build fixtures and
+  spawn processes in Rust rather than shelling out, so the suite runs on
+  Windows as well as Linux and macOS.
 - Full design rationale per command lives under `docs/en/` (English) and
   `docs/zh/` (Chinese, primary author's working language) — read those
   before extending a command, they document *why*, not just *what*.

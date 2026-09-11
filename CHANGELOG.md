@@ -31,7 +31,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and more than one output given as `-` (two record streams interleaved
   into one pipe). Both used to be expressible and would have produced
   plausible-looking garbage.
-
 - **`fastx deinterleave --layout by-suffix`**: routes every record by the
   `/1` or `/2` marker in its own header, ignoring position entirely. This
   covers merged files that are neither interleaved nor a two-half
@@ -52,6 +51,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   does -- required for SRA-style headers where the marker sits in a second
   field. Modern Illumina `1:N:0:` fields are deliberately not treated as
   markers.
+- CLI integration tests (`tests/cli_pipes.rs`, 24 cases) covering the pipe
+  behaviour above: every stdin/stdout path checked byte-for-byte against the
+  equivalent file-based run, the defaulted outputs, each refused stdio
+  combination, and a reader that closes the pipe early. Fixtures and process
+  handling are pure Rust so the suite runs on all three CI platforms;
+  `flate2` becomes a dev-dependency so the tests build and read gzip
+  independently of the code under test.
 - Unit tests for `fastx deinterleave`, which previously had none: routing
   for all three splitters, each guard's rejection path, `--no-pair-check`,
   a concat split whose midpoint falls inside a chunk, and the head probe's
