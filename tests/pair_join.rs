@@ -188,6 +188,15 @@ fn spilling_to_disk_reaches_the_same_answer() {
         got.stderr
     );
 
+    // Deleting a file that is still open succeeds on Unix and fails on
+    // Windows, so a handle left open by the join is invisible here unless the
+    // warning it produces is treated as a failure.
+    assert!(
+        !got.stderr.contains("could not remove"),
+        "spill files should all be deletable by the time the join is done: {}",
+        got.stderr
+    );
+
     let leftovers: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|e| e.ok())

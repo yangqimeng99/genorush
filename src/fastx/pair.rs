@@ -547,7 +547,11 @@ impl Partitions {
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<()> {
+    /// Flushes every partition and hands back their paths, consuming `self`
+    /// so the writers -- and with them the open file handles -- are dropped
+    /// before anything tries to read or delete the files. On Windows an open
+    /// handle makes a file undeletable, so this is not merely tidy.
+    fn finish(mut self) -> Result<Vec<PathBuf>> {
         for (i, w) in self.writers.iter_mut().enumerate() {
             let block = std::mem::take(&mut self.buffers[i]);
             if !block.is_empty() {
@@ -555,7 +559,17 @@ impl Partitions {
             }
             w.flush()?;
         }
-        Ok(())
+        self.writers.clear();
+        Ok(std::mem::take(&mut self.paths))
+    }
+}
+
+/// Deletes a spill file, reporting rather than swallowing a failure: a
+/// platform that will not let the file go is worth knowing about, since the
+/// directory removal at the end depends on it.
+fn discard(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        log::warn!("could not remove the spill file {}: {e}", path.display());
     }
 }
 
@@ -660,9 +674,9 @@ fn spill_and_join(
             }
         }
     }
-    part1.finish()?;
-    part2.finish()?;
     let spilled_bytes = part1.bytes + part2.bytes;
+    let paths1 = part1.finish()?;
+    let paths2 = part2.finish()?;
 
     let mut stats = JoinStats {
         pairs: 0,
@@ -676,31 +690,35 @@ fn spill_and_join(
         // Side one's partition has to be resident to be joined against; side
         // two only streams past it.
         let mut held: HashMap<String, (u64, FastqRecord)> = HashMap::new();
-        let mut held_bytes = 0u64;
-        let mut reader = open_reader(&part1.paths[i])?;
-        while let Some((index, rec)) = decode_record(reader.as_mut())? {
-            held_bytes += footprint(&rec) as u64;
-            ensure!(
-                held_bytes <= budget,
-                "partition {i} of the spilled join does not fit in --max-memory \
-                 ({:.1} GiB and counting). Raise --max-memory or --partitions.",
-                held_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-            );
-            held.insert(rec.base_id().to_string(), (index, rec));
+        {
+            let mut held_bytes = 0u64;
+            let mut reader = open_reader(&paths1[i])?;
+            while let Some((index, rec)) = decode_record(reader.as_mut())? {
+                held_bytes += footprint(&rec) as u64;
+                ensure!(
+                    held_bytes <= budget,
+                    "partition {i} of the spilled join does not fit in --max-memory \
+                     ({:.1} GiB and counting). Raise --max-memory or --partitions.",
+                    held_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                );
+                held.insert(rec.base_id().to_string(), (index, rec));
+            }
         }
 
-        let mut reader = open_reader(&part2.paths[i])?;
-        while let Some((_, rec)) = decode_record(reader.as_mut())? {
-            match held.remove(rec.base_id()) {
-                Some((_, mate)) => {
-                    outputs.r1.push(mate)?;
-                    outputs.r2.push(rec)?;
-                    stats.pairs += 1;
-                }
-                None => {
-                    stats.orphans2 += 1;
-                    if let Some(o) = &mut outputs.orphan2 {
-                        o.push(rec)?;
+        {
+            let mut reader = open_reader(&paths2[i])?;
+            while let Some((_, rec)) = decode_record(reader.as_mut())? {
+                match held.remove(rec.base_id()) {
+                    Some((_, mate)) => {
+                        outputs.r1.push(mate)?;
+                        outputs.r2.push(rec)?;
+                        stats.pairs += 1;
+                    }
+                    None => {
+                        stats.orphans2 += 1;
+                        if let Some(o) = &mut outputs.orphan2 {
+                            o.push(rec)?;
+                        }
                     }
                 }
             }
@@ -716,9 +734,10 @@ fn spill_and_join(
         }
 
         // Reclaim the space as the join advances, so peak disk is the whole
-        // spill only at the moment the join starts.
-        let _ = std::fs::remove_file(&part1.paths[i]);
-        let _ = std::fs::remove_file(&part2.paths[i]);
+        // spill only at the moment the join starts. Both readers are out of
+        // scope by now, which Windows requires before the files will go.
+        discard(&paths1[i]);
+        discard(&paths2[i]);
     }
 
     Ok(stats)
