@@ -3,6 +3,43 @@
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`fastx pair`**: matches up two mate files that have drifted out of sync,
+  writing the pairs plus, optionally, each side's orphans. Quality control
+  breaks pairing silently -- a read dropped from one mate file and kept in the
+  other leaves both files well-formed and every position-based tool
+  downstream aligning reads to the wrong mates.
+
+  Memory is proportional to the drift rather than to the input. Both files are
+  read concurrently and a record is written out and released the moment its
+  mate appears, so only records still waiting are held: 44 records on a
+  lightly filtered pair, against a whole side when one file is reversed.
+  Existing tools index one file wholesale instead -- `seqkit pair` has been
+  reported taking ~380 GB of RAM on a 49 GB + 62 GB pair before dying
+  (shenwei356/seqkit#305), `repair.sh` needs a JVM and a heap size up front,
+  and `fastq-pair` does not read gzip.
+
+  Nothing is declared an orphan before EOF. Flushing early would need both
+  files to be in the same relative order, which is exactly what a re-pairing
+  tool cannot assume, and a record flushed as an orphan whose mate turns up
+  later is silent data loss.
+
+  When the records waiting for mates grow past `--max-memory`, the run
+  finishes through a hash-partitioned join on disk: two mates hash to the same
+  partition, so no pair is ever split and only one partition is resident at a
+  time. Spill files live in a directory under `--temp-dir` (default: the
+  working directory) that is removed on every path out, free space is checked
+  against the inputs' size before anything is written, and partitions are
+  deleted as the join consumes them. `tests/pair_join.rs` requires all three
+  regimes to produce the same pairs and the same orphans.
+  See `docs/en/pair.md` / `docs/zh/pair.md`.
+- `fs4` as a dependency, for the free-space check. Cross-platform disk stats
+  have no `std` equivalent, and refusing to start a spill that cannot finish
+  is worth one small crate.
+
 ## [0.4.0] - 2026-09-11
 
 ### Added

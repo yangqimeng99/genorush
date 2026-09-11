@@ -41,6 +41,7 @@ genorush <类别> <动作> [选项]
 | `fastx`   | `interleave`   | 把 R1/R2 合并成一个标准 interleaved FASTQ |
 | `fastx`   | `deinterleave` | 把合并过的 FASTQ 拆回 R1/R2：按位置（interleaved 或 cat 拼接），或按 header 里的 `/1`、`/2` 标记 |
 | `fastx`   | `cat`      | 合并多次测序的 FASTQ 文件，同时校验有没有重复的 read ID |
+| `fastx`   | `pair`     | 把失步的两个 mate 文件重新配对，内存只与失步程度成正比 |
 
 所有子命令都支持全局参数 `-j/--threads`（默认 `1`；传 `0` 表示使用全部逻辑核心）。
 
@@ -178,6 +179,26 @@ genorush fastx deinterleave -i merged.fq.gz --layout interleaved \
 能把它们分开。`--layout auto` 会探测文件头部来选择策略，而无论最终走哪个
 拆分函数，它都会在写出的过程中逐条复核自己的假设。检测算法与相关取舍见
 [`docs/zh/interleave.md`](docs/zh/interleave.md)。
+
+### `fastx pair`
+
+```bash
+# R1、R2 被各自独立过滤之后，已经不能按位置配对了
+genorush fastx pair -i R1.fq.gz -I R2.fq.gz \
+    -o R1.paired.fq.gz -O R2.paired.fq.gz \
+    -u R1.orphans.fq.gz -U R2.orphans.fq.gz -j 8
+```
+
+质控会静默地破坏配对：一条 read 在某个 mate 文件里被删掉、在另一个里留下，
+两个文件都仍是合法的 FASTQ，而下游所有按位置配对的工具从此开始把 read 和
+错误的 mate 对在一起。
+
+这里的内存只与两个文件**失步的程度**成正比，而不是文件大小——一条记录的 mate
+一出现就立刻写出并释放，所以只是少了几条 read 的文件几乎不占内存。同类工具的
+做法是把整个文件建索引：`seqkit pair` 在 49 GB + 62 GB 的一对文件上被报告吃掉
+约 380 GB 内存后崩溃。而当失步确实很大时（比如文件被重排过），连接会在
+`--max-memory` 之内借助磁盘分区完成，而不是无上限地涨下去。
+详见 [`docs/zh/pair.md`](docs/zh/pair.md)。
 
 ### `fastx cat`
 

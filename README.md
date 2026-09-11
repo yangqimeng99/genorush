@@ -42,6 +42,7 @@ genorush <category> <action> [options]
 | `fastx`  | `interleave` | Merge R1/R2 into a single standard interleaved FASTQ |
 | `fastx`  | `deinterleave` | Split a merged FASTQ back into R1/R2, by position (interleaved or R1-then-R2 concatenated) or by the `/1`+`/2` header markers |
 | `fastx`  | `cat` | Concatenate FASTQ from repeated sequencing runs, checking for duplicate read IDs |
+| `fastx`  | `pair` | Match up two mate files that have drifted out of sync, in memory proportional to the drift |
 
 Every subcommand accepts a global `-j/--threads` flag (default: `1`; pass
 `0` to use all logical cores).
@@ -199,6 +200,28 @@ probes the head of the file to pick a strategy, and whichever splitter runs
 re-checks its assumption on every record as it writes. See
 [`docs/en/interleave.md`](docs/en/interleave.md) for the detection
 algorithm and the trade-offs.
+
+### `fastx pair`
+
+```bash
+# R1 and R2 filtered independently are no longer aligned by position
+genorush fastx pair -i R1.fq.gz -I R2.fq.gz \
+    -o R1.paired.fq.gz -O R2.paired.fq.gz \
+    -u R1.orphans.fq.gz -U R2.orphans.fq.gz -j 8
+```
+
+Quality control breaks pairing silently: a read is dropped from one mate file
+and kept in the other, both files stay well-formed FASTQ, and everything
+downstream that pairs by position starts aligning reads to the wrong mates.
+
+Memory here is proportional to how far apart the files have drifted, not to
+their size — a record is written out and released the moment its mate turns
+up, so files that merely lost a few reads hold almost nothing. The comparable
+tools index one whole file instead: `seqkit pair` has been reported taking
+~380 GB of RAM on a 49 GB + 62 GB pair before dying. When the drift genuinely
+is large (a reordered file), the join finishes through disk partitions under
+`--max-memory` rather than growing without bound. See
+[`docs/en/pair.md`](docs/en/pair.md).
 
 ### `fastx cat`
 

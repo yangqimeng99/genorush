@@ -1,6 +1,7 @@
 pub mod cat;
 pub mod deinterleave;
 pub mod interleave;
+pub mod pair;
 pub mod rename;
 pub mod rescue;
 pub mod sample;
@@ -58,6 +59,12 @@ enum FastxCommand {
     /// and two mates' worth of data needs compressing, so this benefits
     /// from threads more than most commands here. Recommended -j 8.
     Interleave(interleave::InterleaveArgs),
+    /// Match up two mate files that have drifted out of sync, keeping memory proportional to the desync
+    ///
+    /// -j/--threads: nothing is discarded except orphans, so write volume is
+    /// close to read volume and compression is the bottleneck.
+    /// Recommended -j 8.
+    Pair(pair::PairArgs),
     /// Concatenate FASTQ files from repeated sequencing runs, checking for duplicate read IDs
     ///
     /// -j/--threads: a straight concatenation, so write volume equals read
@@ -72,6 +79,7 @@ pub fn run(cli: FastxCli, opts: OutputOpts) -> Result<()> {
         FastxCommand::Rescue(args) => rescue::run(args, opts),
         FastxCommand::Deinterleave(args) => deinterleave::run(args, opts),
         FastxCommand::Interleave(args) => interleave::run(args, opts),
+        FastxCommand::Pair(args) => pair::run(args, opts),
         FastxCommand::Cat(args) => cat::run(args, opts),
     }
 }
