@@ -32,7 +32,7 @@ use crate::common::fastq::{
 };
 use crate::common::hash::fnv1a;
 use crate::io_utils::{
-    display, ensure_one_stdio_at_most, open_block_writer, BlockWriter, OutputOpts,
+    display, ensure_one_stdio_at_most, open_block_writer, BlockWriter, OutputOpts, STDIO,
 };
 
 #[derive(Args, Debug)]
@@ -48,9 +48,9 @@ pub struct CatArgs {
     #[arg(long = "r2", value_name = "FILE")]
     r2: Vec<PathBuf>,
 
-    /// Output for read 1 / single-end reads, or `-` for stdout.
+    /// Output for read 1 / single-end reads. Defaults to stdout.
     /// Gzip-compressed if the path ends in `.gz` or `-z/--gzip` is passed.
-    #[arg(short = 'o', long = "out1", value_name = "FILE")]
+    #[arg(short = 'o', long = "out1", value_name = "FILE", default_value = STDIO)]
     out1: PathBuf,
 
     /// Output for read 2. Required when --r2 is given. Only one of the two

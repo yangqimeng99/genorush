@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -157,6 +157,18 @@ pub enum BlockWriter {
     Plain(BufWriter<Box<dyn Write>>),
 }
 
+/// Whether this write should be refused: gzip bytes aimed at a terminal.
+///
+/// Outputs default to stdout, so forgetting to pipe or redirect is easy.
+/// Plain text landing in the terminal is the usual Unix outcome and stays
+/// allowed -- that is what looking at a few records means. A gzip stream is
+/// different: it is binary, it can garble the terminal, and no one asks for
+/// it on purpose. Split out from the writer so the rule can be tested
+/// without a terminal attached.
+fn is_binary_to_terminal(stdout_bound: bool, gzip: bool, stdout_is_tty: bool) -> bool {
+    stdout_bound && gzip && stdout_is_tty
+}
+
 /// Opens `path` for batched writing, or stdout when `path` is `-`.
 ///
 /// Output is gzip-compressed when the path ends in `.gz` or when
@@ -164,6 +176,20 @@ pub enum BlockWriter {
 /// the only way to ask for compressed output there. See `BlockWriter` for
 /// why this is not a plain `Write`.
 pub fn open_block_writer(path: &Path, opts: OutputOpts) -> Result<BlockWriter> {
+    let is_gz = opts.gzip
+        || path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gz"))
+            .unwrap_or(false);
+
+    if is_binary_to_terminal(is_stdio(path), is_gz, io::stdout().is_terminal()) {
+        bail!(
+            "refusing to write gzip-compressed output to the terminal. Redirect it to a file \
+             or pipe it into another command, or drop -z/--gzip to get plain text here"
+        );
+    }
+
     let sink: Box<dyn Write> = if is_stdio(path) {
         // `Stdout` wraps a `LineWriter`, but `write_blocks` hands it whole
         // blocks at a time, so that costs one newline scan per block rather
@@ -176,13 +202,6 @@ pub fn open_block_writer(path: &Path, opts: OutputOpts) -> Result<BlockWriter> {
         )
     };
     let sink = BufWriter::with_capacity(IO_BUF, sink);
-
-    let is_gz = opts.gzip
-        || path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("gz"))
-            .unwrap_or(false);
 
     if is_gz {
         Ok(BlockWriter::Gzip {
@@ -293,6 +312,18 @@ mod tests {
         let mut back = Vec::new();
         reader.read_to_end(&mut back).unwrap();
         (compressed, back)
+    }
+
+    #[test]
+    fn only_refuses_compressed_output_to_a_terminal() {
+        // gzip + stdout + tty is the one combination worth refusing.
+        assert!(is_binary_to_terminal(true, true, true));
+        // Plain text to a terminal is how you look at a few records.
+        assert!(!is_binary_to_terminal(true, false, true));
+        // Piped or redirected: the reader is another program, not a screen.
+        assert!(!is_binary_to_terminal(true, true, false));
+        // A file output is never the terminal, whatever stdout is doing.
+        assert!(!is_binary_to_terminal(false, true, true));
     }
 
     #[test]

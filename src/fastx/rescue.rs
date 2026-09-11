@@ -39,7 +39,7 @@ use crate::common::fastq::{
     format_into_blocks, recv_pair_step, spawn_reader, FastqRecord, PairStep,
 };
 use crate::io_utils::{
-    display, ensure_one_stdio_at_most, open_block_writer, BlockWriter, OutputOpts,
+    display, ensure_one_stdio_at_most, open_block_writer, BlockWriter, OutputOpts, STDIO,
 };
 
 #[derive(Args, Debug)]
@@ -55,9 +55,9 @@ pub struct RescueArgs {
     #[arg(short = 'I', long = "in2", value_name = "FILE")]
     in2: Option<PathBuf>,
 
-    /// Output for the rescued read 1 / single-end reads, or `-` for stdout.
+    /// Output for the rescued read 1 / single-end reads. Defaults to stdout.
     /// Gzip-compressed if the path ends in `.gz` or `-z/--gzip` is passed.
-    #[arg(short = 'o', long = "out1", value_name = "FILE")]
+    #[arg(short = 'o', long = "out1", value_name = "FILE", default_value = STDIO)]
     out1: PathBuf,
 
     /// Output for the rescued read 2. Required when -I/--in2 is given. Only

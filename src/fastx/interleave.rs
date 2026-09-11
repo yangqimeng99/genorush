@@ -27,7 +27,7 @@ use clap::Args;
 use crate::common::fastq::{
     format_into_blocks, recv_pair_step, spawn_reader, FastqRecord, PairStep,
 };
-use crate::io_utils::{display, ensure_one_stdio_at_most, open_block_writer, OutputOpts};
+use crate::io_utils::{display, ensure_one_stdio_at_most, open_block_writer, OutputOpts, STDIO};
 
 #[derive(Args, Debug)]
 pub struct InterleaveArgs {
@@ -40,9 +40,11 @@ pub struct InterleaveArgs {
     #[arg(short = 'I', long = "in2", value_name = "FILE")]
     in2: PathBuf,
 
-    /// Output interleaved FASTQ, or `-` for stdout. Gzip-compressed if the
-    /// path ends in `.gz` or `-z/--gzip` is passed.
-    #[arg(short = 'o', long = "out", value_name = "FILE")]
+    /// Output interleaved FASTQ. Defaults to stdout, which is what an
+    /// aligner reading interleaved input on a pipe wants (`| bwa mem -p ref
+    /// -`). Gzip-compressed if the path ends in `.gz` or `-z/--gzip` is
+    /// passed.
+    #[arg(short = 'o', long = "out", value_name = "FILE", default_value = STDIO)]
     output: PathBuf,
 
     /// Skip verifying that R1/R2 read IDs correspond to the same pair at

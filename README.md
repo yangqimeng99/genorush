@@ -48,19 +48,27 @@ Every subcommand accepts a global `-j/--threads` flag (default: `1`; pass
 
 ### Pipes
 
-Every input and output accepts `-` for stdin/stdout, so commands compose
-with the rest of a pipeline:
+**Output goes to stdout unless you name a file**, and every input accepts
+`-` for stdin, so commands compose with the rest of a pipeline:
 
 ```bash
-# read a merged FASTQ off a pipe
+# no -o: sampled reads go straight to an aligner, no temporary file
+genorush fastx sample -i reads.fq.gz -p 0.1 -s 42 | bwa mem ref.fa -
+
+# interleave and align in one go
+genorush fastx interleave -i R1.fq.gz -I R2.fq.gz | bwa mem -p ref.fa -
+
+# read a merged FASTQ off a pipe, write both mates to files
 zcat merged.fq.gz | genorush fastx deinterleave -i - -o R1.fq.gz -O R2.fq.gz
 
-# hand sampled reads straight to an aligner, no temporary file
-genorush fastx sample -i reads.fq.gz -p 0.1 -s 42 -o - | bwa mem ref.fa -
-
-# both ends piped, with the output gzip-compressed
-cat genome.fa | genorush fastx rename - -n map.tsv -o - -z > renamed.fa.gz
+# both ends piped, output gzip-compressed
+cat genome.fa | genorush fastx rename - -n map.tsv -z > renamed.fa.gz
 ```
+
+`-o -` is still accepted and means exactly what omitting it does. Commands
+with two outputs (`fastx deinterleave`, and the paired-end modes of
+`sample`/`rescue`/`cat`) default only their first output to stdout; the
+second has to be a file, since two record streams cannot share one pipe.
 
 Compressed *input* needs no flag: gzip is recognised from the data itself,
 so a pipe carrying `.gz` bytes just works. Compressed *output* can't be
@@ -81,8 +89,11 @@ Two consequences of there being exactly one stdin and one stdout:
   (`--layout interleaved`, `--layout by-suffix`). Everything else, this
   command included, is single-pass and pipes fine.
 
-A downstream that stops reading (`... -o - | head`) ends the run cleanly
-rather than reporting a broken-pipe failure.
+A downstream that stops reading (`... | head`) ends the run cleanly rather
+than reporting a broken-pipe failure. Gzip output aimed at a terminal is
+refused, since defaulting to stdout makes a forgotten redirect easy and
+binary on a terminal is never what was wanted; plain text to a terminal is
+left alone, because that is how you look at a few records.
 
 ### `fastx rename` / `gff rename`
 

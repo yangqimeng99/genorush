@@ -13,7 +13,7 @@ use rayon::prelude::*;
 
 use crate::io_utils::{
     display, ensure_one_stdio_at_most, open_block_writer, open_reader, read_line_chunk,
-    BlockWriter, OutputOpts,
+    BlockWriter, OutputOpts, STDIO,
 };
 
 #[derive(Args, Debug)]
@@ -29,9 +29,10 @@ pub struct RenameCommonArgs {
     #[arg(short = 'n', long)]
     pub name: PathBuf,
 
-    /// Output file, or `-` to write stdout. Gzip-compressed if the path
-    /// ends in `.gz` or `-z/--gzip` is passed.
-    #[arg(short = 'o', long)]
+    /// Output file. Defaults to stdout, so the result can be piped straight
+    /// into the next command; `-` means the same thing written out.
+    /// Gzip-compressed if the path ends in `.gz` or `-z/--gzip` is passed.
+    #[arg(short = 'o', long, default_value = STDIO)]
     pub output: PathBuf,
 
     /// Number of lines processed per parallel batch. Bounds peak memory

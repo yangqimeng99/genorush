@@ -46,18 +46,26 @@ genorush <类别> <动作> [选项]
 
 ### 管道
 
-所有输入和输出都接受 `-` 表示 stdin/stdout，可以直接嵌进现有流程：
+**不指定输出文件时，结果直接写 stdout**；所有输入都接受 `-` 表示 stdin。
+于是可以直接嵌进现有流程：
 
 ```bash
-# 从管道读入合并过的 FASTQ
+# 不写 -o：抽样结果直接喂给比对软件，不落临时文件
+genorush fastx sample -i reads.fq.gz -p 0.1 -s 42 | bwa mem ref.fa -
+
+# 合并成 interleaved 后直接比对
+genorush fastx interleave -i R1.fq.gz -I R2.fq.gz | bwa mem -p ref.fa -
+
+# 从管道读入合并过的 FASTQ，两个 mate 都写成文件
 zcat merged.fq.gz | genorush fastx deinterleave -i - -o R1.fq.gz -O R2.fq.gz
 
-# 抽样结果直接喂给比对软件，不落临时文件
-genorush fastx sample -i reads.fq.gz -p 0.1 -s 42 -o - | bwa mem ref.fa -
-
 # 两端都走管道，并把输出压缩
-cat genome.fa | genorush fastx rename - -n map.tsv -o - -z > renamed.fa.gz
+cat genome.fa | genorush fastx rename - -n map.tsv -z > renamed.fa.gz
 ```
+
+`-o -` 依然可以写，含义与省略完全相同。有两个输出的命令
+（`fastx deinterleave`，以及 `sample`/`rescue`/`cat` 的双端模式）只有第一个
+输出默认走 stdout，第二个必须是文件——两股记录流不能共用一个管道。
 
 压缩**输入**不需要任何参数：gzip 是从数据本身识别的，所以管道里流的是 `.gz`
 字节也能直接处理。压缩**输出**没法同样推断——管道没有 `.gz` 扩展名可看——所以
@@ -73,8 +81,10 @@ cat genome.fa | genorush fastx rename - -n map.tsv -o - -z > renamed.fa.gz
   并提示改用单遍的布局（`--layout interleaved`、`--layout by-suffix`）。
   除此之外的所有场景（包括这个命令本身）都是单遍的，可以正常走管道。
 
-下游提前停止读取（`... -o - | head`）会让本次运行正常结束，而不是报
-broken pipe 错误。
+下游提前停止读取（`... | head`）会让本次运行正常结束，而不是报 broken pipe
+错误。压缩数据写向终端会被拒绝——默认输出到 stdout 意味着很容易忘记重定向，
+而终端上的二进制流从来不是想要的结果；明文写终端则不拦，因为那正是"看几条
+记录"的正常用法。
 
 ### `fastx rename` / `gff rename`
 

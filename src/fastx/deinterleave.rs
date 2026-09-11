@@ -74,7 +74,7 @@ use clap::{Args, ValueEnum};
 use crate::common::fastq::{format_into_blocks, spawn_reader, FastqRecord, Mate};
 use crate::common::hash::fnv1a;
 use crate::io_utils::{
-    display, ensure_one_stdio_at_most, is_stdio, open_block_writer, BlockWriter, OutputOpts,
+    display, ensure_one_stdio_at_most, is_stdio, open_block_writer, BlockWriter, OutputOpts, STDIO,
 };
 
 /// How many records the `auto` probe reads before deciding. Large enough
@@ -100,14 +100,16 @@ pub struct DeinterleaveArgs {
     #[arg(short = 'i', long = "in", value_name = "FILE")]
     input: PathBuf,
 
-    /// Output for read 1, or `-` for stdout. Gzip-compressed if the path
-    /// ends in `.gz` or `-z/--gzip` is passed.
-    #[arg(short = 'o', long = "out1", value_name = "FILE")]
+    /// Output for read 1. Defaults to stdout, so one mate can stream on
+    /// while the other is written to the file named by -O. Gzip-compressed
+    /// if the path ends in `.gz` or `-z/--gzip` is passed.
+    #[arg(short = 'o', long = "out1", value_name = "FILE", default_value = STDIO)]
     out1: PathBuf,
 
-    /// Output for read 2, or `-` for stdout -- though only one of the two
-    /// outputs can be `-`, since both would land in the same pipe.
-    /// Gzip-compressed if the path ends in `.gz` or `-z/--gzip` is passed.
+    /// Output for read 2. Required: unlike -o this has no default, because
+    /// the two mates cannot both go to stdout -- they would interleave into
+    /// one pipe. Gzip-compressed if the path ends in `.gz` or `-z/--gzip`
+    /// is passed.
     #[arg(short = 'O', long = "out2", value_name = "FILE")]
     out2: PathBuf,
 

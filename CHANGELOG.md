@@ -14,6 +14,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `-z/--gzip`, which forces gzip regardless of the output path. File
   outputs are unaffected: a `.gz` path still compresses on its own, and
   every existing invocation behaves exactly as before.
+- **Outputs default to stdout.** `-o` is no longer required: omitting it
+  writes to stdout, the same as passing `-o -`, so a command can be dropped
+  into a pipeline without naming a destination at all
+  (`genorush fastx interleave -i R1.fq.gz -I R2.fq.gz | bwa mem -p ref.fa -`).
+  Commands with two outputs default only the first; the second must still
+  be a file, since two record streams cannot share one pipe. Existing
+  invocations are unaffected -- making a required argument optional cannot
+  change what an explicit `-o` already did.
+- Refusal to write gzip-compressed output to a terminal. Now that outputs
+  default to stdout, a forgotten redirect is easy, and binary on a terminal
+  is never the goal. Plain text to a terminal stays allowed: that is how
+  looking at a few records works.
 - Refusal of the two stdio combinations that cannot work: more than one
   input given as `-` (each would get an arbitrary half of the same stdin)
   and more than one output given as `-` (two record streams interleaved
