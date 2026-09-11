@@ -12,9 +12,10 @@ pub struct RenameArgs {
     common: RenameCommonArgs,
 }
 
-fn gff_line(line: &str, dict: &HashMap<String, String>) -> String {
+fn gff_line(line: &str, dict: &HashMap<String, String>, out: &mut Vec<u8>) {
     if line.starts_with('#') {
-        return line.to_string();
+        out.extend_from_slice(line.as_bytes());
+        return;
     }
     let mut fields = line.splitn(2, '\t');
     let seqid = fields.next().unwrap_or("");
@@ -23,10 +24,12 @@ fn gff_line(line: &str, dict: &HashMap<String, String>) -> String {
         // original Python script's `'\t'.join(...)` behavior exactly, so
         // byte-for-byte output parity holds on malformed/short lines too.
         Some(new_name) => {
-            let rest = fields.next().unwrap_or("");
-            format!("{new_name}\t{rest}")
+            out.extend_from_slice(new_name.as_bytes());
+            out.push(b'\t');
+            out.extend_from_slice(fields.next().unwrap_or("").as_bytes());
         }
-        None => line.to_string(),
+        // A seqid that is not in the mapping leaves the line untouched.
+        None => out.extend_from_slice(line.as_bytes()),
     }
 }
 

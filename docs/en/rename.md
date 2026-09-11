@@ -93,10 +93,29 @@ map — never on neighboring lines or on any running state. `common::rename::run
 exploits this directly:
 
 1. Read up to `--chunk-lines` (default 200,000) lines into a `Vec<String>`.
-2. Hand the chunk to `rayon`'s `par_iter().map(transform).collect()` —
-   `rayon::collect` on a `Vec` preserves input order regardless of how work
-   is split across threads, so no explicit re-ordering step is needed.
-3. Write the transformed chunk, repeat until EOF.
+2. Split the chunk into one contiguous group per rayon thread, and have each
+   task append its group's transformed lines into a byte buffer of its own.
+   `rayon::collect` preserves input order regardless of how work is split
+   across threads, so the buffers come back in order and no re-ordering step
+   is needed.
+3. Hand those buffers straight to `BlockWriter` as the blocks it compresses
+   in parallel, repeat until EOF.
+
+Step 2 is where this differs from the obvious version, which transforms each
+line into a `String`, collects them, and joins the result. That allocates
+once per line and copies every line twice. Writing into a per-task buffer
+allocates once per *group*: an unchanged line becomes a `memcpy`, and a
+rewritten one a few appends. A `Cow<str>` return type was tried in between
+and is worth recording as a dead end -- it removes the allocation only for
+lines that pass through unchanged, so on a GFF whose seqids are all in the
+mapping, where every line is rewritten, it measured ~11% *slower* than the
+`String` version it replaced. Buffers win in both directions because they do
+not care whether a line changed.
+
+The transform signature follows from this: `Fn(&str, &HashMap<..>, &mut
+Vec<u8>)` rather than something returning a line. Slightly less pretty, and
+the reason the format-specific code in `fastx/rename.rs` and `gff/rename.rs`
+appends bytes instead of building strings.
 
 Chunking exists for one reason: **bounding memory**. A whole-genome FASTA
 can be tens of millions of lines; without chunking, either the whole file
@@ -131,21 +150,41 @@ compression to parallelize); for gzip output on a large reference genome,
 Validated against the real Python script (not a re-derivation of its logic —
 the actual script, fetched and executed) on FASTA with header descriptions,
 GFF with comment lines and unmapped contigs, and gzip input/output: output
-is byte-identical (`diff` clean) in every case tested. On a 112 MB / 1.9M-line
-synthetic FASTA (29 chromosomes), wall time was ~5.9 s for the Python script
-vs. ~0.65–0.79 s here — the gap is dominated by Python's `os.popen`/`less`
-subprocess overhead and interpreter line-processing cost, not by the
-rename logic itself; this is I/O-bound work, so the multi-threaded chunking
-buys comparatively little here (1 thread vs. 12 threads gave similar wall
-time on that file). The parallel architecture starts paying off more
-directly on commands with heavier per-record computation.
+is byte-identical (`diff` clean) in every case tested. That comparison is no
+longer a one-off — `tests/rename_parity.rs` runs the binary against outputs
+the script produced, committed under `tests/data/rename/`, on inputs chosen
+to exercise every rule in the contract above.
+
+On a 112 MB / 1.9M-line synthetic FASTA (29 chromosomes), wall time was
+~5.9 s for the Python script vs. well under a second here — the gap is
+dominated by Python's `os.popen`/`less` subprocess overhead and interpreter
+line-processing cost, not by the rename logic itself.
+
+Moving from per-line `String`s to per-task buffers (see above) was measured
+on a 311 MB / 5.1M-line FASTA and a 319 MB / 5M-line GFF, best of nine runs
+alternating between builds, output verified byte-identical each time:
+
+| | before | after | |
+|---|---|---|---|
+| FASTA, plain → plain | 0.77 s | 0.58 s | −24% |
+| FASTA, plain → gzip | 3.74 s | 3.38 s | −10% |
+| FASTA, gzip → gzip | 4.24 s | 3.90 s | −8% |
+| GFF, plain → plain | 0.90 s | 0.57 s | −36% |
+| GFF, every seqid rewritten | 0.89 s | 0.59 s | −33% |
+| GFF, no seqid in the mapping | 0.86 s | 0.62 s | −27% |
+
+Peak RSS on the plain FASTA case fell from 59 MB to 35 MB with the
+intermediate `Vec<String>` gone. The gzip rows move less because compression
+dominates those runs — which is also why they move at all only because the
+line work shrank so much.
 
 ## Extending this pattern
 
 To add a new `<category> rename`-like command:
 
 1. If the transform is line-oriented and stateless like this one, write it
-   as a `Fn(&str, &HashMap<String, String>) -> String` (or generalize
+   as a `Fn(&str, &HashMap<String, String>, &mut Vec<u8>)` -- appending to
+   the given buffer rather than returning a new line (or generalize
    `common::rename::run`'s signature further if the shared state isn't a
    name map) and reuse `common::rename::run` directly — see
    `src/fastx/rename.rs` and `src/gff/rename.rs` for the ~15-line pattern.

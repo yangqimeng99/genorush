@@ -73,24 +73,34 @@ pub fn load_name_dict(path: &std::path::Path) -> Result<HashMap<String, String>>
     Ok(map)
 }
 
-/// Splits `lines` into up to `rayon::current_num_threads()` byte blocks
-/// (newline-joined), so `BlockWriter::write_blocks` has independent units
-/// of work to gzip-compress in parallel. Mirrors
-/// `common::fastq::format_into_blocks`, just for plain text lines instead
-/// of `FastqRecord`s -- `rename` works on FASTA/GFF lines, which have no
-/// FASTQ-style record structure to preserve.
-fn lines_into_blocks(lines: &[String]) -> Vec<Vec<u8>> {
+/// Formats one batch of lines straight into the byte blocks that
+/// `BlockWriter::write_blocks` compresses in parallel.
+///
+/// The obvious shape for this -- transform each line into a `String`,
+/// collect them, then join -- allocates once per line and copies every line
+/// twice. Neither is needed: each rayon task owns one output buffer and
+/// appends into it, so an unchanged line is a `memcpy` and a rewritten one
+/// is a few appends, with no per-line allocation either way. The buffers are
+/// sized up front from the lines they will hold, so they never grow.
+fn format_into_blocks(
+    lines: &[String],
+    dict: &HashMap<String, String>,
+    transform: &(impl Fn(&str, &HashMap<String, String>, &mut Vec<u8>) + Sync),
+) -> Vec<Vec<u8>> {
     if lines.is_empty() {
         return Vec::new();
     }
     let n = rayon::current_num_threads().max(1).min(lines.len());
-    let chunk_size = lines.len().div_ceil(n);
+    let group_size = lines.len().div_ceil(n);
     lines
-        .chunks(chunk_size)
+        .par_chunks(group_size)
         .map(|group| {
-            let mut buf = Vec::new();
+            // A rewritten line can differ in length from its input, but not
+            // by much -- a name swap -- so this is the right order of
+            // magnitude and usually exact.
+            let mut buf = Vec::with_capacity(group.iter().map(|l| l.len() + 1).sum());
             for line in group {
-                buf.extend_from_slice(line.as_bytes());
+                transform(line, dict, &mut buf);
                 buf.push(b'\n');
             }
             buf
@@ -101,9 +111,16 @@ fn lines_into_blocks(lines: &[String]) -> Vec<Vec<u8>> {
 /// Streams `args.input` to `args.output`, applying `transform` to every line
 /// in parallel batches of `args.chunk_lines`. `transform` receives the
 /// trimmed line and the loaded name dictionary.
+///
+/// `transform` appends the transformed line to a buffer rather than
+/// returning a new one. Returning `String` allocated once per line, and
+/// returning `Cow` only helped the lines that pass through unchanged -- on a
+/// GFF whose seqids are all in the mapping, every line is rewritten and the
+/// `Cow` was pure overhead. Writing into a caller-owned buffer costs nothing
+/// in either direction.
 pub fn run(
     args: &RenameCommonArgs,
-    transform: impl Fn(&str, &HashMap<String, String>) -> String + Sync,
+    transform: impl Fn(&str, &HashMap<String, String>, &mut Vec<u8>) + Sync,
     opts: OutputOpts,
 ) -> Result<()> {
     ensure!(args.chunk_lines > 0, "--chunk-lines must be > 0");
@@ -130,8 +147,7 @@ pub fn run(
         if n == 0 {
             break;
         }
-        let out: Vec<String> = chunk.par_iter().map(|l| transform(l, &dict)).collect();
-        writer.write_blocks(lines_into_blocks(&out))?;
+        writer.write_blocks(format_into_blocks(&chunk, &dict, &transform))?;
         total_lines += n as u64;
     }
     writer.flush().context("failed to flush output")?;

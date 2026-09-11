@@ -12,16 +12,19 @@ pub struct RenameArgs {
     common: RenameCommonArgs,
 }
 
-fn fasta_line(line: &str, dict: &HashMap<String, String>) -> String {
+fn fasta_line(line: &str, dict: &HashMap<String, String>, out: &mut Vec<u8>) {
     match line.strip_prefix('>') {
         Some(rest) => {
+            // A header is rewritten either way: mapped or not, the original
+            // script keeps only the first token, so the description goes.
             let old_name = rest.split_whitespace().next().unwrap_or("");
-            match dict.get(old_name) {
-                Some(new_name) => format!(">{new_name}"),
-                None => format!(">{old_name}"),
-            }
+            let name = dict.get(old_name).map_or(old_name, |n| n.as_str());
+            out.push(b'>');
+            out.extend_from_slice(name.as_bytes());
         }
-        None => line.to_string(),
+        // Sequence lines -- nearly the whole file -- are copied straight
+        // through.
+        None => out.extend_from_slice(line.as_bytes()),
     }
 }
 
