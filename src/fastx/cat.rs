@@ -31,12 +31,15 @@ use crate::common::fastq::{
     format_into_blocks, recv_pair_step, spawn_reader, FastqRecord, PairStep,
 };
 use crate::common::hash::fnv1a;
-use crate::io_utils::{open_block_writer, BlockWriter};
+use crate::io_utils::{
+    display, ensure_one_stdio_at_most, open_block_writer, BlockWriter, OutputOpts,
+};
 
 #[derive(Args, Debug)]
 pub struct CatArgs {
     /// Read 1 (or single-end) input file. Repeat once per source run, in
-    /// the order they should be concatenated.
+    /// the order they should be concatenated. At most one input across
+    /// --r1/--r2 may be `-`, since there is only one stdin.
     #[arg(long = "r1", value_name = "FILE", required = true)]
     r1: Vec<PathBuf>,
 
@@ -45,11 +48,13 @@ pub struct CatArgs {
     #[arg(long = "r2", value_name = "FILE")]
     r2: Vec<PathBuf>,
 
-    /// Output for read 1 / single-end reads. Gzip-compressed if the path ends in `.gz`.
+    /// Output for read 1 / single-end reads, or `-` for stdout.
+    /// Gzip-compressed if the path ends in `.gz` or `-z/--gzip` is passed.
     #[arg(short = 'o', long = "out1", value_name = "FILE")]
     out1: PathBuf,
 
-    /// Output for read 2. Required when --r2 is given.
+    /// Output for read 2. Required when --r2 is given. Only one of the two
+    /// outputs can be `-`: both would land in the same pipe.
     #[arg(short = 'O', long = "out2", value_name = "FILE")]
     out2: Option<PathBuf>,
 
@@ -64,14 +69,24 @@ pub struct CatArgs {
     chunk_records: usize,
 }
 
-pub fn run(args: CatArgs) -> Result<()> {
+pub fn run(args: CatArgs, opts: OutputOpts) -> Result<()> {
     ensure!(!args.r1.is_empty(), "at least one --r1 input is required");
+    let inputs: Vec<&Path> = args
+        .r1
+        .iter()
+        .chain(args.r2.iter())
+        .map(|p| p.as_path())
+        .collect();
+    ensure_one_stdio_at_most(&inputs, "input")?;
+    let mut outputs: Vec<&Path> = vec![args.out1.as_path()];
+    outputs.extend(args.out2.as_deref());
+    ensure_one_stdio_at_most(&outputs, "output")?;
     if args.r2.is_empty() {
         ensure!(
             args.out2.is_none(),
             "-O/--out2 was given but no --r2 inputs were provided"
         );
-        run_se(&args)
+        run_se(&args, opts)
     } else {
         ensure!(
             args.r2.len() == args.r1.len(),
@@ -83,7 +98,7 @@ pub fn run(args: CatArgs) -> Result<()> {
             args.out2.is_some(),
             "-O/--out2 is required when --r2 is given"
         );
-        run_pe(&args)
+        run_pe(&args, opts)
     }
 }
 
@@ -98,15 +113,15 @@ fn check_duplicate(seen: &mut SeenIds, id: &str, path: &Path, local_idx: u64) ->
             "duplicate read ID {id:?}: first seen in {} (record #{prev_idx}), again in {} (record #{local_idx}) -- \
              did you accidentally include the same file twice? pass --allow-duplicate-ids to skip this check",
             prev_path.display(),
-            path.display()
+            display(path)
         );
     }
     Ok(())
 }
 
-fn run_se(args: &CatArgs) -> Result<()> {
+fn run_se(args: &CatArgs, opts: OutputOpts) -> Result<()> {
     let start = Instant::now();
-    let mut writer = open_block_writer(&args.out1)?;
+    let mut writer = open_block_writer(&args.out1, opts)?;
     let mut seen = SeenIds::new();
     let check_ids = !args.allow_duplicate_ids;
     let mut total: u64 = 0;
@@ -204,10 +219,10 @@ fn cat_one_pe_source(
     Ok(local_idx)
 }
 
-fn run_pe(args: &CatArgs) -> Result<()> {
+fn run_pe(args: &CatArgs, opts: OutputOpts) -> Result<()> {
     let start = Instant::now();
-    let mut w1 = open_block_writer(&args.out1)?;
-    let mut w2 = open_block_writer(args.out2.as_ref().expect("checked by run()"))?;
+    let mut w1 = open_block_writer(&args.out1, opts)?;
+    let mut w2 = open_block_writer(args.out2.as_ref().expect("checked by run()"), opts)?;
     let mut seen = SeenIds::new();
     let check_ids = !args.allow_duplicate_ids;
     let mut total: u64 = 0;

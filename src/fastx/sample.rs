@@ -30,7 +30,9 @@ use crate::common::fastq::{
     format_into_blocks as blocks_se, recv_pair_step, spawn_reader, FastqRecord, PairStep,
 };
 use crate::common::rng::{deterministic_f64, SplitMix64};
-use crate::io_utils::{open_block_writer, BlockWriter};
+use crate::io_utils::{
+    display, ensure_one_stdio_at_most, open_block_writer, BlockWriter, OutputOpts,
+};
 
 /// A pair of per-mate byte-block lists, aligned so index `i` in each holds
 /// the same read pairs.
@@ -67,19 +69,24 @@ fn blocks_pe(r1s: &[&FastqRecord], r2s: &[&FastqRecord]) -> Result<PairedBlocks>
 
 #[derive(Args, Debug)]
 pub struct SampleArgs {
-    /// Input FASTQ (.fastq/.fq, gzip/bgzip auto-detected). Read 1 (R1) in paired-end mode.
+    /// Input FASTQ (.fastq/.fq, gzip/bgzip auto-detected), or `-` for stdin.
+    /// Read 1 (R1) in paired-end mode.
     #[arg(short = 'i', long = "in1", value_name = "FILE")]
     in1: PathBuf,
 
-    /// Read 2 (R2) mate file. Presence of this flag switches to paired-end mode.
+    /// Read 2 (R2) mate file. Presence of this flag switches to paired-end
+    /// mode. Only one of the two inputs can be `-`: both mates would be
+    /// reading the same stdin.
     #[arg(short = 'I', long = "in2", value_name = "FILE")]
     in2: Option<PathBuf>,
 
-    /// Output for read 1 / single-end reads. Gzip-compressed if the path ends in `.gz`.
+    /// Output for read 1 / single-end reads, or `-` for stdout.
+    /// Gzip-compressed if the path ends in `.gz` or `-z/--gzip` is passed.
     #[arg(short = 'o', long = "out1", value_name = "FILE")]
     out1: PathBuf,
 
-    /// Output for read 2. Required when -I/--in2 is given.
+    /// Output for read 2. Required when -I/--in2 is given. Only one of the
+    /// two outputs can be `-`: both would land in the same pipe.
     #[arg(short = 'O', long = "out2", value_name = "FILE", requires = "in2")]
     out2: Option<PathBuf>,
 
@@ -125,7 +132,7 @@ fn effective_seed(args: &SampleArgs) -> u64 {
     }
 }
 
-pub fn run(args: SampleArgs) -> Result<()> {
+pub fn run(args: SampleArgs, opts: OutputOpts) -> Result<()> {
     ensure!(
         args.proportion.is_some() || args.number.is_some(),
         "must specify one of -p/--proportion or -n/--number"
@@ -140,6 +147,12 @@ pub fn run(args: SampleArgs) -> Result<()> {
         ensure!(n > 0, "-n/--number must be > 0");
     }
     ensure!(args.chunk_records > 0, "--chunk-records must be > 0");
+    let mut inputs: Vec<&std::path::Path> = vec![args.in1.as_path()];
+    inputs.extend(args.in2.as_deref());
+    ensure_one_stdio_at_most(&inputs, "input")?;
+    let mut outputs: Vec<&std::path::Path> = vec![args.out1.as_path()];
+    outputs.extend(args.out2.as_deref());
+    ensure_one_stdio_at_most(&outputs, "output")?;
     if args.in2.is_some() {
         ensure!(
             args.out2.is_some(),
@@ -158,16 +171,16 @@ pub fn run(args: SampleArgs) -> Result<()> {
     );
 
     match (&args.in2, &args.out2) {
-        (Some(in2), Some(out2)) => run_pe(&args, seed, in2, out2),
-        _ => run_se(&args, seed),
+        (Some(in2), Some(out2)) => run_pe(&args, seed, in2, out2, opts),
+        _ => run_se(&args, seed, opts),
     }
 }
 
-fn run_se(args: &SampleArgs, seed: u64) -> Result<()> {
+fn run_se(args: &SampleArgs, seed: u64, opts: OutputOpts) -> Result<()> {
     let start = Instant::now();
-    log::info!("sampling {} -> {}", args.in1.display(), args.out1.display());
+    log::info!("sampling {} -> {}", display(&args.in1), display(&args.out1));
     let rx = spawn_reader(args.in1.clone())?;
-    let mut writer = open_block_writer(&args.out1)?;
+    let mut writer = open_block_writer(&args.out1, opts)?;
 
     let (total, kept) = if let Some(p) = args.proportion {
         run_proportion_se(&rx, &mut writer, seed, p, args.chunk_records)?
@@ -284,19 +297,20 @@ fn run_pe(
     seed: u64,
     in2: &std::path::Path,
     out2: &std::path::Path,
+    opts: OutputOpts,
 ) -> Result<()> {
     let start = Instant::now();
     log::info!(
         "sampling paired-end {} + {} -> {} + {}",
-        args.in1.display(),
-        in2.display(),
-        args.out1.display(),
-        out2.display()
+        display(&args.in1),
+        display(in2),
+        display(&args.out1),
+        display(out2)
     );
     let rx1 = spawn_reader(args.in1.clone())?;
     let rx2 = spawn_reader(in2.to_path_buf())?;
-    let mut w1 = open_block_writer(&args.out1)?;
-    let mut w2 = open_block_writer(out2)?;
+    let mut w1 = open_block_writer(&args.out1, opts)?;
+    let mut w2 = open_block_writer(out2, opts)?;
     let check_ids = !args.no_pair_check;
 
     let (total, kept) = if let Some(p) = args.proportion {

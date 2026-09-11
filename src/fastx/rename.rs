@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::common::rename::{self, RenameCommonArgs};
+use crate::io_utils::OutputOpts;
 
 #[derive(Args, Debug)]
 pub struct RenameArgs {
@@ -24,6 +25,6 @@ fn fasta_line(line: &str, dict: &HashMap<String, String>) -> String {
     }
 }
 
-pub fn run(args: RenameArgs) -> Result<()> {
-    rename::run(&args.common, fasta_line)
+pub fn run(args: RenameArgs, opts: OutputOpts) -> Result<()> {
+    rename::run(&args.common, fasta_line, opts)
 }

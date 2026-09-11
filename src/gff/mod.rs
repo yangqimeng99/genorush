@@ -3,6 +3,8 @@ pub mod rename;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
+use crate::io_utils::OutputOpts;
+
 /// GFF/GTF annotation utilities
 #[derive(Args, Debug)]
 pub struct GffCli {
@@ -22,8 +24,8 @@ enum GffCommand {
     Rename(rename::RenameArgs),
 }
 
-pub fn run(cli: GffCli) -> Result<()> {
+pub fn run(cli: GffCli, opts: OutputOpts) -> Result<()> {
     match cli.command {
-        GffCommand::Rename(args) => rename::run(args),
+        GffCommand::Rename(args) => rename::run(args, opts),
     }
 }

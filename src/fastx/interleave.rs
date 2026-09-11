@@ -27,19 +27,21 @@ use clap::Args;
 use crate::common::fastq::{
     format_into_blocks, recv_pair_step, spawn_reader, FastqRecord, PairStep,
 };
-use crate::io_utils::open_block_writer;
+use crate::io_utils::{display, ensure_one_stdio_at_most, open_block_writer, OutputOpts};
 
 #[derive(Args, Debug)]
 pub struct InterleaveArgs {
-    /// Read 1 (R1) FASTQ (.fastq/.fq, gzip/bgzip auto-detected).
+    /// Read 1 (R1) FASTQ (.fastq/.fq, gzip/bgzip auto-detected), or `-` for stdin.
     #[arg(short = 'i', long = "in1", value_name = "FILE")]
     in1: PathBuf,
 
-    /// Read 2 (R2) mate file.
+    /// Read 2 (R2) mate file. Only one of the two inputs can be `-`: both
+    /// mates would be reading the same stdin.
     #[arg(short = 'I', long = "in2", value_name = "FILE")]
     in2: PathBuf,
 
-    /// Output interleaved FASTQ. Gzip-compressed if the path ends in `.gz`.
+    /// Output interleaved FASTQ, or `-` for stdout. Gzip-compressed if the
+    /// path ends in `.gz` or `-z/--gzip` is passed.
     #[arg(short = 'o', long = "out", value_name = "FILE")]
     output: PathBuf,
 
@@ -54,18 +56,20 @@ pub struct InterleaveArgs {
     chunk_records: usize,
 }
 
-pub fn run(args: InterleaveArgs) -> Result<()> {
+pub fn run(args: InterleaveArgs, opts: OutputOpts) -> Result<()> {
+    ensure_one_stdio_at_most(&[&args.in1, &args.in2], "input")?;
+
     let start = Instant::now();
     log::info!(
         "interleaving {} + {} -> {}",
-        args.in1.display(),
-        args.in2.display(),
-        args.output.display()
+        display(&args.in1),
+        display(&args.in2),
+        display(&args.output)
     );
 
     let rx1 = spawn_reader(args.in1.clone())?;
     let rx2 = spawn_reader(args.in2.clone())?;
-    let mut writer = open_block_writer(&args.output)?;
+    let mut writer = open_block_writer(&args.output, opts)?;
     let check_ids = !args.no_pair_check;
 
     let mut chunk: Vec<FastqRecord> = Vec::with_capacity(args.chunk_records * 2);

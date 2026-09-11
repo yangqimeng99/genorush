@@ -1,8 +1,8 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -10,23 +10,94 @@ use rayon::prelude::*;
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
-/// Opens `path` for reading, transparently decompressing gzip/bgzip input.
+/// Buffer size for the reader that sits directly on the file or on stdin.
+/// Large enough that a `Stdin` handle's internal per-`read` lock is amortised
+/// over a big chunk rather than paid per small read.
+const IO_BUF: usize = 256 * 1024;
+
+/// The conventional stand-in for stdin/stdout on a command line. A path
+/// equal to this is never opened as a file.
+pub const STDIO: &str = "-";
+
+/// Whether `path` refers to stdin/stdout rather than a file on disk.
+pub fn is_stdio(path: &Path) -> bool {
+    path.as_os_str() == STDIO
+}
+
+/// Rejects a set of paths that would all have to be the same stream.
+///
+/// Two inputs reading `-` would race for the same stdin, each getting an
+/// arbitrary half of it; two outputs writing `-` would interleave two
+/// different record streams into one pipe. Both produce plausible-looking
+/// garbage rather than an error, so they are refused up front. `role`
+/// names what is being checked, for the error message.
+pub fn ensure_one_stdio_at_most(paths: &[&Path], role: &str) -> Result<()> {
+    let n = paths.iter().filter(|p| is_stdio(p)).count();
+    if n > 1 {
+        bail!(
+            "{n} {role}s were given as `-`, but there is only one stdin/stdout to go around; \
+             at most one {role} can use `-`, the rest must be files"
+        );
+    }
+    Ok(())
+}
+
+/// How an output should be compressed, for outputs whose path can't say.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OutputOpts {
+    /// Force gzip compression regardless of the output path's extension.
+    /// Set by the global `--gzip` flag, which is the only way to ask for
+    /// compressed output on stdout (`-o -` has no extension to inspect).
+    pub gzip: bool,
+}
+
+/// Opens `path` for reading, transparently decompressing gzip/bgzip input,
+/// or reads stdin when `path` is `-`.
+///
 /// Detection is by magic bytes rather than file extension, so gzip data
-/// piped through a renamed file still works. `MultiGzDecoder` is required
-/// (not `GzDecoder`) because bgzip-compressed genome references are valid
-/// concatenated multi-member gzip streams.
+/// piped through a renamed file (or through a pipe, which has no name at
+/// all) still works. The two magic bytes are *peeked* via `BufRead::fill_buf`
+/// rather than read-and-rewound: a pipe cannot seek back, and peeking works
+/// the same on both kinds of input, so there is one code path instead of
+/// two. `MultiGzDecoder` is required (not `GzDecoder`) because
+/// bgzip-compressed references, and this tool's own `BlockWriter` output,
+/// are valid concatenated multi-member gzip streams.
 pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open input file: {}", path.display()))?;
-
-    let mut magic = [0u8; 2];
-    let read_n = file.read(&mut magic)?;
-    file.seek(SeekFrom::Start(0))?;
-
-    if read_n == 2 && magic == GZIP_MAGIC {
-        Ok(Box::new(BufReader::new(MultiGzDecoder::new(file))))
+    let raw: Box<dyn Read + Send> = if is_stdio(path) {
+        // `Stdin`, not `StdinLock`: the lock guard is not `Send`, and these
+        // readers get moved onto their own thread by `spawn_reader`.
+        Box::new(io::stdin())
     } else {
-        Ok(Box::new(BufReader::new(file)))
+        Box::new(
+            File::open(path)
+                .with_context(|| format!("failed to open input file: {}", path.display()))?,
+        )
+    };
+
+    let mut buf = BufReader::with_capacity(IO_BUF, raw);
+    let is_gzip = {
+        let head = buf
+            .fill_buf()
+            .with_context(|| format!("failed to read from: {}", display(path)))?;
+        head.len() >= 2 && head[..2] == GZIP_MAGIC
+    };
+
+    if is_gzip {
+        Ok(Box::new(BufReader::with_capacity(
+            IO_BUF,
+            MultiGzDecoder::new(buf),
+        )))
+    } else {
+        Ok(Box::new(buf))
+    }
+}
+
+/// How a path should be described in messages: `-` is not a filename.
+pub fn display(path: &Path) -> String {
+    if is_stdio(path) {
+        "<stdin/stdout>".to_string()
+    } else {
+        path.display().to_string()
     }
 }
 
@@ -70,36 +141,56 @@ pub fn read_line_chunk(
 ///
 /// `write_blocks` takes each caller-provided block, compresses it into its
 /// own gzip member (in parallel across blocks, via rayon), and writes the
-/// members to the file in the same order the blocks were given -- so
+/// members to the sink in the same order the blocks were given -- so
 /// output is deterministic and byte-order-preserving despite the
 /// compression happening out of order across threads.
+///
+/// The sink is a trait object so the same batching and parallel compression
+/// applies whether the destination is a file or stdout. Blocks are large
+/// (hundreds of KB up), so the one dynamic call per block costs nothing
+/// measurable next to the compression it wraps.
 pub enum BlockWriter {
     Gzip {
-        file: BufWriter<File>,
+        sink: BufWriter<Box<dyn Write>>,
         level: Compression,
     },
-    Plain(BufWriter<File>),
+    Plain(BufWriter<Box<dyn Write>>),
 }
 
-/// Opens `path` for batched writing, gzip-compressing in parallel members
-/// if the path ends in `.gz`. See `BlockWriter` for why this differs from
-/// `open_writer`.
-pub fn open_block_writer(path: &Path) -> Result<BlockWriter> {
-    let file = File::create(path)
-        .with_context(|| format!("failed to create output file: {}", path.display()))?;
-    let is_gz = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("gz"))
-        .unwrap_or(false);
+/// Opens `path` for batched writing, or stdout when `path` is `-`.
+///
+/// Output is gzip-compressed when the path ends in `.gz` or when
+/// `opts.gzip` is set. Stdout has no extension to inspect, so `--gzip` is
+/// the only way to ask for compressed output there. See `BlockWriter` for
+/// why this is not a plain `Write`.
+pub fn open_block_writer(path: &Path, opts: OutputOpts) -> Result<BlockWriter> {
+    let sink: Box<dyn Write> = if is_stdio(path) {
+        // `Stdout` wraps a `LineWriter`, but `write_blocks` hands it whole
+        // blocks at a time, so that costs one newline scan per block rather
+        // than a flush per line.
+        Box::new(io::stdout())
+    } else {
+        Box::new(
+            File::create(path)
+                .with_context(|| format!("failed to create output file: {}", path.display()))?,
+        )
+    };
+    let sink = BufWriter::with_capacity(IO_BUF, sink);
+
+    let is_gz = opts.gzip
+        || path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gz"))
+            .unwrap_or(false);
 
     if is_gz {
         Ok(BlockWriter::Gzip {
-            file: BufWriter::new(file),
+            sink,
             level: Compression::default(),
         })
     } else {
-        Ok(BlockWriter::Plain(BufWriter::new(file)))
+        Ok(BlockWriter::Plain(sink))
     }
 }
 
@@ -110,7 +201,7 @@ impl BlockWriter {
     /// sub-split).
     pub fn write_blocks(&mut self, blocks: Vec<Vec<u8>>) -> Result<()> {
         match self {
-            BlockWriter::Gzip { file, level } => {
+            BlockWriter::Gzip { sink, level } => {
                 let level = *level;
                 let compressed: Vec<Vec<u8>> = blocks
                     .into_par_iter()
@@ -122,7 +213,7 @@ impl BlockWriter {
                     })
                     .collect::<Result<Vec<_>>>()?;
                 for member in compressed {
-                    file.write_all(&member)?;
+                    sink.write_all(&member)?;
                 }
                 Ok(())
             }
@@ -139,8 +230,111 @@ impl BlockWriter {
 
     pub fn flush(&mut self) -> io::Result<()> {
         match self {
-            BlockWriter::Gzip { file, .. } => file.flush(),
+            BlockWriter::Gzip { sink, .. } => sink.flush(),
             BlockWriter::Plain(w) => w.flush(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn recognizes_the_stdio_path() {
+        assert!(is_stdio(Path::new("-")));
+        assert!(!is_stdio(Path::new("./-")));
+        assert!(!is_stdio(Path::new("-.fastq")));
+        assert!(!is_stdio(Path::new("reads.fq")));
+    }
+
+    #[test]
+    fn allows_at_most_one_stdio_per_role() {
+        let dash = PathBuf::from("-");
+        let file = PathBuf::from("reads.fq");
+        assert!(ensure_one_stdio_at_most(&[&dash, &file], "input").is_ok());
+        assert!(ensure_one_stdio_at_most(&[&file, &file], "input").is_ok());
+        let err = ensure_one_stdio_at_most(&[&dash, &dash], "input").unwrap_err();
+        assert!(
+            err.to_string().contains("only one stdin/stdout"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn describes_stdio_without_pretending_it_is_a_file() {
+        assert_eq!(display(Path::new("-")), "<stdin/stdout>");
+        assert_eq!(display(Path::new("reads.fq")), "reads.fq");
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch");
+        std::fs::create_dir_all(&dir).expect("failed to create test scratch dir");
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        dir.join(format!("{name}.{n}.{}.bin", std::process::id()))
+    }
+
+    fn round_trip(path: &Path, opts: OutputOpts, payload: &[u8]) -> (bool, Vec<u8>) {
+        let mut w = open_block_writer(path, opts).unwrap();
+        w.write_blocks(vec![payload.to_vec()]).unwrap();
+        w.flush().unwrap();
+
+        let raw = std::fs::read(path).unwrap();
+        let compressed = raw.len() >= 2 && raw[..2] == GZIP_MAGIC;
+
+        // Reading back goes through the same magic-byte peek every command
+        // uses, so this also covers detection without a seekable rewind.
+        let mut reader = open_reader(path).unwrap();
+        let mut back = Vec::new();
+        reader.read_to_end(&mut back).unwrap();
+        (compressed, back)
+    }
+
+    #[test]
+    fn plain_output_stays_plain_and_reads_back() {
+        let p = scratch("plain");
+        let (compressed, back) = round_trip(&p, OutputOpts::default(), b"@r\nACGT\n+\nIIII\n");
+        assert!(
+            !compressed,
+            "no .gz extension and no --gzip: must stay plain"
+        );
+        assert_eq!(back, b"@r\nACGT\n+\nIIII\n");
+    }
+
+    #[test]
+    fn gz_extension_compresses_and_reads_back() {
+        let p = scratch("ext").with_extension("gz");
+        let (compressed, back) = round_trip(&p, OutputOpts::default(), b"ACGTACGTACGT\n");
+        assert!(compressed, ".gz extension must compress");
+        assert_eq!(back, b"ACGTACGTACGT\n");
+    }
+
+    #[test]
+    fn gzip_flag_compresses_regardless_of_extension() {
+        let p = scratch("forced");
+        let (compressed, back) = round_trip(&p, OutputOpts { gzip: true }, b"ACGTACGTACGT\n");
+        assert!(compressed, "--gzip must compress even without a .gz name");
+        assert_eq!(back, b"ACGTACGTACGT\n");
+    }
+
+    #[test]
+    fn multi_member_output_reads_back_as_one_stream() {
+        // Every block becomes its own gzip member; a reader must see them
+        // as a single continuous stream.
+        let p = scratch("members").with_extension("gz");
+        let mut w = open_block_writer(&p, OutputOpts::default()).unwrap();
+        w.write_blocks(vec![b"first\n".to_vec(), Vec::new(), b"second\n".to_vec()])
+            .unwrap();
+        w.write_blocks(vec![b"third\n".to_vec()]).unwrap();
+        w.flush().unwrap();
+
+        let mut back = String::new();
+        open_reader(&p).unwrap().read_to_string(&mut back).unwrap();
+        assert_eq!(back, "first\nsecond\nthird\n");
     }
 }

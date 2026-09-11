@@ -8,6 +8,8 @@ pub mod sample;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
+use crate::io_utils::OutputOpts;
+
 /// FASTA/FASTQ sequence utilities
 #[derive(Args, Debug)]
 pub struct FastxCli {
@@ -63,13 +65,13 @@ enum FastxCommand {
     Cat(cat::CatArgs),
 }
 
-pub fn run(cli: FastxCli) -> Result<()> {
+pub fn run(cli: FastxCli, opts: OutputOpts) -> Result<()> {
     match cli.command {
-        FastxCommand::Rename(args) => rename::run(args),
-        FastxCommand::Sample(args) => sample::run(args),
-        FastxCommand::Rescue(args) => rescue::run(args),
-        FastxCommand::Deinterleave(args) => deinterleave::run(args),
-        FastxCommand::Interleave(args) => interleave::run(args),
-        FastxCommand::Cat(args) => cat::run(args),
+        FastxCommand::Rename(args) => rename::run(args, opts),
+        FastxCommand::Sample(args) => sample::run(args, opts),
+        FastxCommand::Rescue(args) => rescue::run(args, opts),
+        FastxCommand::Deinterleave(args) => deinterleave::run(args, opts),
+        FastxCommand::Interleave(args) => interleave::run(args, opts),
+        FastxCommand::Cat(args) => cat::run(args, opts),
     }
 }

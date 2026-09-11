@@ -11,20 +11,26 @@ use anyhow::{ensure, Context, Result};
 use clap::Args;
 use rayon::prelude::*;
 
-use crate::io_utils::{open_block_writer, open_reader, read_line_chunk, BlockWriter};
+use crate::io_utils::{
+    display, ensure_one_stdio_at_most, open_block_writer, open_reader, read_line_chunk,
+    BlockWriter, OutputOpts,
+};
 
 #[derive(Args, Debug)]
 pub struct RenameCommonArgs {
-    /// Input file. Gzip/bgzip is auto-detected regardless of extension.
+    /// Input file, or `-` to read stdin. Gzip/bgzip is auto-detected from
+    /// the data itself, so piped-in compressed input works too.
     #[arg(value_name = "FILE")]
     pub input: PathBuf,
 
     /// Mapping file: two whitespace-separated columns per line, `new_name old_name`.
-    /// May itself be gzip compressed.
+    /// May itself be gzip compressed, and may be `-` (but not when the
+    /// input is also `-`).
     #[arg(short = 'n', long)]
     pub name: PathBuf,
 
-    /// Output file. Written gzip-compressed if the path ends in `.gz`.
+    /// Output file, or `-` to write stdout. Gzip-compressed if the path
+    /// ends in `.gz` or `-z/--gzip` is passed.
     #[arg(short = 'o', long)]
     pub output: PathBuf,
 
@@ -97,22 +103,24 @@ fn lines_into_blocks(lines: &[String]) -> Vec<Vec<u8>> {
 pub fn run(
     args: &RenameCommonArgs,
     transform: impl Fn(&str, &HashMap<String, String>) -> String + Sync,
+    opts: OutputOpts,
 ) -> Result<()> {
     ensure!(args.chunk_lines > 0, "--chunk-lines must be > 0");
+    ensure_one_stdio_at_most(&[&args.input, &args.name], "input")?;
 
     let start = Instant::now();
-    log::info!("loading name mapping from {}", args.name.display());
+    log::info!("loading name mapping from {}", display(&args.name));
     let dict = load_name_dict(&args.name)?;
     log::info!("loaded {} name mappings", dict.len());
 
     log::info!(
         "processing {} -> {}",
-        args.input.display(),
-        args.output.display()
+        display(&args.input),
+        display(&args.output)
     );
 
     let mut reader = open_reader(&args.input)?;
-    let mut writer: BlockWriter = open_block_writer(&args.output)?;
+    let mut writer: BlockWriter = open_block_writer(&args.output, opts)?;
 
     let mut chunk = Vec::with_capacity(args.chunk_lines);
     let mut total_lines: u64 = 0;

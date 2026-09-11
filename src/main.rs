@@ -19,6 +19,15 @@ struct Cli {
     #[arg(short = 'j', long, global = true, default_value_t = 1)]
     threads: usize,
 
+    /// Gzip-compress every output, whatever the output path looks like.
+    ///
+    /// Outputs are normally compressed when their path ends in `.gz`, which
+    /// stdout has no way to express: `-o -` is a pipe, not a filename. This
+    /// flag is how a pipeline asks for compressed output. It is a no-op for
+    /// a path that already ends in `.gz`.
+    #[arg(short = 'z', long, global = true)]
+    gzip: bool,
+
     #[command(subcommand)]
     command: TopCommand,
 }
@@ -42,8 +51,10 @@ fn main() -> Result<()> {
     }
     log::info!("using {} worker thread(s)", rayon::current_num_threads());
 
+    let opts = io_utils::OutputOpts { gzip: cli.gzip };
+
     match cli.command {
-        TopCommand::Fastx(c) => fastx::run(c),
-        TopCommand::Gff(c) => gff::run(c),
+        TopCommand::Fastx(c) => fastx::run(c, opts),
+        TopCommand::Gff(c) => gff::run(c, opts),
     }
 }

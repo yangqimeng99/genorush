@@ -65,6 +65,7 @@
 //! a single file.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use anyhow::{bail, ensure, Result};
@@ -72,7 +73,9 @@ use clap::{Args, ValueEnum};
 
 use crate::common::fastq::{format_into_blocks, spawn_reader, FastqRecord, Mate};
 use crate::common::hash::fnv1a;
-use crate::io_utils::{open_block_writer, BlockWriter};
+use crate::io_utils::{
+    display, ensure_one_stdio_at_most, is_stdio, open_block_writer, BlockWriter, OutputOpts,
+};
 
 /// How many records the `auto` probe reads before deciding. Large enough
 /// that an alternating-mate pattern can't hold by coincidence, small enough
@@ -89,15 +92,22 @@ enum Layout {
 
 #[derive(Args, Debug)]
 pub struct DeinterleaveArgs {
-    /// Merged input FASTQ (.fastq/.fq, gzip/bgzip auto-detected).
+    /// Merged input FASTQ (.fastq/.fq, gzip/bgzip auto-detected), or `-`
+    /// to read stdin. A pipe can only be read once, so stdin rules out the
+    /// layouts that need a second pass: `--layout concat` always, and
+    /// `--layout auto` only if the head of the stream turns out to be
+    /// inconclusive.
     #[arg(short = 'i', long = "in", value_name = "FILE")]
     input: PathBuf,
 
-    /// Output for read 1. Gzip-compressed if the path ends in `.gz`.
+    /// Output for read 1, or `-` for stdout. Gzip-compressed if the path
+    /// ends in `.gz` or `-z/--gzip` is passed.
     #[arg(short = 'o', long = "out1", value_name = "FILE")]
     out1: PathBuf,
 
-    /// Output for read 2. Gzip-compressed if the path ends in `.gz`.
+    /// Output for read 2, or `-` for stdout -- though only one of the two
+    /// outputs can be `-`, since both would land in the same pipe.
+    /// Gzip-compressed if the path ends in `.gz` or `-z/--gzip` is passed.
     #[arg(short = 'O', long = "out2", value_name = "FILE")]
     out2: PathBuf,
 
@@ -134,6 +144,55 @@ enum DetectedLayout {
     Concat,
 }
 
+/// A record stream that can have records handed back to it.
+///
+/// The probe has to read records to form an opinion, and those records are
+/// still part of the input. On a file the splitter could simply re-open and
+/// start over, which is what an earlier version did; on stdin there is no
+/// starting over. Buffering the probed records here and replaying them
+/// ahead of the channel makes one pass serve both, and removes the second
+/// open in the file case as a side effect.
+struct Records {
+    preamble: std::vec::IntoIter<FastqRecord>,
+    rx: Receiver<Result<FastqRecord>>,
+}
+
+impl Records {
+    fn open(path: &Path) -> Result<Self> {
+        Ok(Self {
+            preamble: Vec::new().into_iter(),
+            rx: spawn_reader(path.to_path_buf())?,
+        })
+    }
+
+    fn next_record(&mut self) -> Option<Result<FastqRecord>> {
+        if let Some(rec) = self.preamble.next() {
+            return Some(Ok(rec));
+        }
+        self.rx.recv().ok()
+    }
+
+    /// Puts already-read records back at the front of the stream. Only
+    /// valid while nothing is pending, which is the case right after a
+    /// probe has drained everything it buffered.
+    fn replay(&mut self, records: Vec<FastqRecord>) {
+        debug_assert_eq!(self.preamble.len(), 0);
+        self.preamble = records.into_iter();
+    }
+
+    /// Refills `chunk` with up to `n` records, leaving it empty at EOF.
+    fn fill(&mut self, chunk: &mut Vec<FastqRecord>, n: usize) -> Result<()> {
+        chunk.clear();
+        while chunk.len() < n {
+            match self.next_record() {
+                Some(r) => chunk.push(r?),
+                None => break,
+            }
+        }
+        Ok(())
+    }
+}
+
 /// What the first `PROBE_RECORDS` records say about the file's layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeadProbe {
@@ -145,35 +204,27 @@ struct HeadProbe {
     pairs_share_id: bool,
 }
 
-/// Reads at most `k` records from the head of `path` and reports what they
-/// imply about the layout. Cheap: it decompresses only as far as it needs to,
-/// then drops the receiver, which stops the reader thread on its next send.
-fn probe_head(path: &Path, k: usize) -> Result<HeadProbe> {
-    let rx = spawn_reader(path.to_path_buf())?;
-    let mut records = 0usize;
-    let mut all_have_marker = true;
-    let mut pairs_share_id = true;
-    let mut prev: Option<String> = None;
-
-    for r in rx.iter().take(k) {
-        let rec = r?;
-        if rec.mate_suffix().is_none() {
-            all_have_marker = false;
+/// Reads at most `k` records off the front of `src`, reports what they imply
+/// about the layout, and replays them so the split still sees them. Cheap:
+/// it decompresses only as far as it needs to.
+fn probe_head(src: &mut Records, k: usize) -> Result<HeadProbe> {
+    let mut buf: Vec<FastqRecord> = Vec::with_capacity(k);
+    while buf.len() < k {
+        match src.next_record() {
+            Some(r) => buf.push(r?),
+            None => break,
         }
-        match (records % 2, prev.take()) {
-            // Even index: remember this record's id, its mate should follow.
-            (0, _) => prev = Some(rec.base_id().to_string()),
-            // Odd index: it must match the record just before it.
-            (_, Some(first)) => {
-                if first != rec.base_id() {
-                    pairs_share_id = false;
-                }
-            }
-            (_, None) => unreachable!("odd index always follows a remembered even index"),
-        }
-        records += 1;
     }
 
+    let records = buf.len();
+    let all_have_marker = buf.iter().all(|r| r.mate_suffix().is_some());
+    let pairs_share_id = buf
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|pair| pair[0].base_id() == pair[1].base_id());
+
+    src.replay(buf);
     Ok(HeadProbe {
         records,
         all_have_marker: all_have_marker && records > 0,
@@ -249,21 +300,17 @@ fn count_records(path: &Path) -> Result<usize> {
 /// comparison of two borrowed records instead of having to carry an owned
 /// id across the boundary.
 fn split_interleaved(
-    input: &Path,
+    src: &mut Records,
     w1: &mut BlockWriter,
     w2: &mut BlockWriter,
     chunk_records: usize,
     check_ids: bool,
 ) -> Result<(u64, u64)> {
     let chunk_records = chunk_records + (chunk_records % 2);
-    let rx = spawn_reader(input.to_path_buf())?;
     let mut chunk: Vec<FastqRecord> = Vec::with_capacity(chunk_records);
     let mut total: u64 = 0;
     loop {
-        chunk.clear();
-        for r in rx.iter().take(chunk_records) {
-            chunk.push(r?);
-        }
+        src.fill(&mut chunk, chunk_records)?;
         if chunk.is_empty() {
             break;
         }
@@ -314,7 +361,7 @@ fn split_interleaved(
 /// whose mate runs don't start and end at the midpoint -- the failure mode
 /// that otherwise produces a full-looking, silently wrong pair of outputs.
 fn split_concat(
-    input: &Path,
+    src: &mut Records,
     w1: &mut BlockWriter,
     w2: &mut BlockWriter,
     chunk_records: usize,
@@ -326,17 +373,13 @@ fn split_concat(
         "input has an odd number of records ({n}); a merged paired-end file must have an even count"
     );
     let half = n / 2;
-    let rx = spawn_reader(input.to_path_buf())?;
     let mut chunk: Vec<FastqRecord> = Vec::with_capacity(chunk_records);
     let mut total: usize = 0;
     // The mate each half has settled on, learned from the first marked
     // record seen in that half.
     let mut half_mate: [Option<Mate>; 2] = [None, None];
     loop {
-        chunk.clear();
-        for r in rx.iter().take(chunk_records) {
-            chunk.push(r?);
-        }
+        src.fill(&mut chunk, chunk_records)?;
         if chunk.is_empty() {
             break;
         }
@@ -407,21 +450,17 @@ fn split_concat(
 /// fall back on for that record, and silently dropping it (as the shell
 /// `awk` one-liners that inspired this mode do) loses data.
 fn split_by_suffix(
-    input: &Path,
+    src: &mut Records,
     w1: &mut BlockWriter,
     w2: &mut BlockWriter,
     chunk_records: usize,
 ) -> Result<(u64, u64)> {
-    let rx = spawn_reader(input.to_path_buf())?;
     let mut chunk: Vec<FastqRecord> = Vec::with_capacity(chunk_records);
     let mut total: u64 = 0;
     let mut n1: u64 = 0;
     let mut n2: u64 = 0;
     loop {
-        chunk.clear();
-        for r in rx.iter().take(chunk_records) {
-            chunk.push(r?);
-        }
+        src.fill(&mut chunk, chunk_records)?;
         if chunk.is_empty() {
             break;
         }
@@ -450,29 +489,60 @@ fn split_by_suffix(
     Ok((n1, n2))
 }
 
-pub fn run(args: DeinterleaveArgs) -> Result<()> {
+/// A layout that needs the record count up front, or a second look at the
+/// input, cannot be served by a pipe: there is no second look. Reject that
+/// combination with a message that says what to do instead, rather than
+/// half-reading stdin and failing somewhere less obvious.
+fn ensure_rereadable(input: &Path, what: &str) -> Result<()> {
+    ensure!(
+        !is_stdio(input),
+        "{what}, which is impossible when the input is stdin -- a pipe can only be read once. \
+         Either give the input as a file, or pass a single-pass --layout \
+         (interleaved or by-suffix) if you already know how the file is laid out."
+    );
+    Ok(())
+}
+
+pub fn run(args: DeinterleaveArgs, opts: OutputOpts) -> Result<()> {
     ensure!(args.chunk_records > 0, "--chunk-records must be > 0");
+    ensure_one_stdio_at_most(&[&args.out1, &args.out2], "output")?;
+
     let start = Instant::now();
-    let mut w1 = open_block_writer(&args.out1)?;
-    let mut w2 = open_block_writer(&args.out2)?;
+    let mut w1 = open_block_writer(&args.out1, opts)?;
+    let mut w2 = open_block_writer(&args.out2, opts)?;
     let check = !args.no_pair_check;
+    log::info!(
+        "splitting {} -> {} + {}",
+        display(&args.input),
+        display(&args.out1),
+        display(&args.out2)
+    );
 
     let (n1, n2) = match args.layout {
         Layout::Interleaved => {
             log::info!("layout: interleaved (explicit)");
-            split_interleaved(&args.input, &mut w1, &mut w2, args.chunk_records, check)?
+            let mut src = Records::open(&args.input)?;
+            split_interleaved(&mut src, &mut w1, &mut w2, args.chunk_records, check)?
         }
         Layout::Concat => {
+            ensure_rereadable(
+                &args.input,
+                "--layout concat needs the total record count before it can find the midpoint, \
+                 so it reads the input twice",
+            )?;
             log::info!("layout: concat (explicit); counting records first");
             let n = count_records(&args.input)?;
-            split_concat(&args.input, &mut w1, &mut w2, args.chunk_records, n, check)?
+            let mut src = Records::open(&args.input)?;
+            split_concat(&mut src, &mut w1, &mut w2, args.chunk_records, n, check)?
         }
         Layout::BySuffix => {
             log::info!("layout: by-suffix (explicit)");
-            split_by_suffix(&args.input, &mut w1, &mut w2, args.chunk_records)?
+            let mut src = Records::open(&args.input)?;
+            split_by_suffix(&mut src, &mut w1, &mut w2, args.chunk_records)?
         }
         Layout::Auto => {
-            let probe = probe_head(&args.input, PROBE_RECORDS)?;
+            let mut src = Records::open(&args.input)?;
+            let probe = probe_head(&mut src, PROBE_RECORDS)?;
             ensure!(probe.records > 0, "input is empty, nothing to deinterleave");
             if probe.pairs_share_id {
                 log::info!(
@@ -480,15 +550,21 @@ pub fn run(args: DeinterleaveArgs) -> Result<()> {
                      interleaved, verifying each pair while writing",
                     probe.records
                 );
-                split_interleaved(&args.input, &mut w1, &mut w2, args.chunk_records, check)?
+                split_interleaved(&mut src, &mut w1, &mut w2, args.chunk_records, check)?
             } else if probe.all_have_marker {
                 log::info!(
                     "probed {} records: no shared ids, but every record carries a /1 or /2 \
                      marker -- routing by marker (--layout by-suffix)",
                     probe.records
                 );
-                split_by_suffix(&args.input, &mut w1, &mut w2, args.chunk_records)?
+                split_by_suffix(&mut src, &mut w1, &mut w2, args.chunk_records)?
             } else {
+                drop(src);
+                ensure_rereadable(
+                    &args.input,
+                    "the first records carry no mate markers and no shared ids, so the layout \
+                     can only be settled by scanning the whole input and then splitting it",
+                )?;
                 log::info!(
                     "probed {} records: inconclusive (no mate markers, no shared ids) -- \
                      falling back to scanning the whole input to detect the layout",
@@ -496,12 +572,13 @@ pub fn run(args: DeinterleaveArgs) -> Result<()> {
                 );
                 let (layout, n) = detect_layout(&args.input)?;
                 log::info!("detected layout: {layout:?} ({n} total records)");
+                let mut src = Records::open(&args.input)?;
                 match layout {
                     DetectedLayout::Interleaved => {
-                        split_interleaved(&args.input, &mut w1, &mut w2, args.chunk_records, check)?
+                        split_interleaved(&mut src, &mut w1, &mut w2, args.chunk_records, check)?
                     }
                     DetectedLayout::Concat => {
-                        split_concat(&args.input, &mut w1, &mut w2, args.chunk_records, n, check)?
+                        split_concat(&mut src, &mut w1, &mut w2, args.chunk_records, n, check)?
                     }
                 }
             }
@@ -575,19 +652,20 @@ mod tests {
         let out1 = scratch("out1");
         let out2 = scratch("out2");
         write_fastq(&input, headers);
-        let mut w1 = open_block_writer(&out1)?;
-        let mut w2 = open_block_writer(&out2)?;
+        let mut w1 = open_block_writer(&out1, OutputOpts::default())?;
+        let mut w2 = open_block_writer(&out2, OutputOpts::default())?;
         let result = (|| -> Result<()> {
+            let mut src = Records::open(&input)?;
             match layout {
                 Layout::Interleaved => {
-                    split_interleaved(&input, &mut w1, &mut w2, 4, check)?;
+                    split_interleaved(&mut src, &mut w1, &mut w2, 4, check)?;
                 }
                 Layout::Concat => {
                     let n = count_records(&input)?;
-                    split_concat(&input, &mut w1, &mut w2, 4, n, check)?;
+                    split_concat(&mut src, &mut w1, &mut w2, 4, n, check)?;
                 }
                 Layout::BySuffix => {
-                    split_by_suffix(&input, &mut w1, &mut w2, 4)?;
+                    split_by_suffix(&mut src, &mut w1, &mut w2, 4)?;
                 }
                 Layout::Auto => unreachable!("tests dispatch layouts explicitly"),
             }
@@ -727,7 +805,26 @@ mod tests {
     fn probe(headers: &[&str]) -> HeadProbe {
         let input = scratch("probe");
         write_fastq(&input, headers);
-        probe_head(&input, PROBE_RECORDS).unwrap()
+        let mut src = Records::open(&input).unwrap();
+        probe_head(&mut src, PROBE_RECORDS).unwrap()
+    }
+
+    /// A probe must hand back everything it consumed, or the split that
+    /// follows it silently loses the head of the input -- the whole reason
+    /// the stream is replayable.
+    #[test]
+    fn probe_replays_every_record_it_consumed() {
+        let input = scratch("replay");
+        let headers = ["@a/1", "@a/2", "@b/1", "@b/2"];
+        write_fastq(&input, &headers);
+        let mut src = Records::open(&input).unwrap();
+        probe_head(&mut src, PROBE_RECORDS).unwrap();
+
+        let mut seen = Vec::new();
+        while let Some(r) = src.next_record() {
+            seen.push(r.unwrap().header);
+        }
+        assert_eq!(seen, headers);
     }
 
     #[test]
