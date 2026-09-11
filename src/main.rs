@@ -3,7 +3,6 @@ mod fastx;
 mod gff;
 mod io_utils;
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 /// GenoRush - a fast, parallel, cross-platform CLI toolkit for bioinformatics data
@@ -38,7 +37,23 @@ enum TopCommand {
     Gff(gff::GffCli),
 }
 
-fn main() -> Result<()> {
+/// True if the failure is really "the process on the other end of our stdout
+/// stopped reading" -- `genorush ... -o - | head` being the everyday case.
+///
+/// Rust ignores SIGPIPE, so instead of dying quietly like a C tool would,
+/// the write comes back as `ErrorKind::BrokenPipe` and would otherwise be
+/// reported as a command failure: an error message the user did not cause
+/// and a non-zero status that trips `set -o pipefail` in any wrapping
+/// script.
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
+fn main() -> std::process::ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let cli = Cli::parse();
@@ -53,8 +68,22 @@ fn main() -> Result<()> {
 
     let opts = io_utils::OutputOpts { gzip: cli.gzip };
 
-    match cli.command {
+    let result = match cli.command {
         TopCommand::Fastx(c) => fastx::run(c, opts),
         TopCommand::Gff(c) => gff::run(c, opts),
+    };
+
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) if is_broken_pipe(&e) => {
+            log::info!("output pipe closed by the reader; stopping early");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            // Matches what `fn main() -> Result<()>` used to print, so error
+            // output is unchanged for every failure that isn't a broken pipe.
+            eprintln!("Error: {e:?}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
