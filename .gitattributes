@@ -1,0 +1,6 @@
+# Test fixtures are compared byte for byte, so their line endings are part of
+# the data, not a local formatting preference. Windows CI checks out with
+# core.autocrlf=true, which would rewrite every LF in them to CRLF and break
+# the comparison -- and in tests/data/rename/input.* it would also erase the
+# single CRLF line that exists precisely to prove the tool strips it.
+tests/data/** -text
