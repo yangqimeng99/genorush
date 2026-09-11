@@ -1,6 +1,12 @@
 //! Shared plumbing for the CLI integration tests: build fixtures, run the
 //! binary with real pipes attached, and read the results back.
 //!
+//! Each integration test binary compiles its own copy of this module and uses
+//! some of it, so anything only one of them needs would be dead code in the
+//! others.
+#![allow(dead_code)]
+
+//!
 //! Everything here is written in Rust rather than shelling out, because CI
 //! runs these tests on Windows as well as Linux and macOS -- `cat`, `zcat`
 //! and friends are not available on all three, and their flags differ where
@@ -166,4 +172,12 @@ pub fn assert_refused(out: &Output, needle: &str) {
         stderr.contains(needle),
         "refused, but not for the expected reason.\nlooking for: {needle}\nstderr:\n{stderr}"
     );
+}
+
+/// A committed fixture under `tests/data/`.
+pub fn data(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data")
+        .join(relative)
 }

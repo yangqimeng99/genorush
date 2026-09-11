@@ -1,0 +1,14 @@
+>1
+ACGTACGTACGT
+acgt with surrounding whitespace
+>2
+GGGG
+>chrUnmapped
+TTTT
+>
+AAAA
+
+>3
+CCCC
+>1
+NNNN

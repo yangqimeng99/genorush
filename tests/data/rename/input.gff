@@ -1,0 +1,10 @@
+##gff-version 3
+#!genome-build unit-test
+chr1	src	gene	1	100	.	+	.	ID=g1;Name=a
+chr2	src	exon	5	50	.	-	.	ID=e1
+chrUnmapped	src	gene	1	10	.	+	.	ID=g2
+chr1
+   chr2	src	gene	1	5	.	+	.	ID=g3
+chr3	src	gene	7	9	.	+	.	ID=g4
+
+# a trailing comment

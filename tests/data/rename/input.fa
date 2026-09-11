@@ -1,0 +1,14 @@
+>chr1 a description after the first token
+ACGTACGTACGT
+   acgt with surrounding whitespace   
+>chr2	description after a tab
+GGGG
+>chrUnmapped some contig
+TTTT
+>
+AAAA
+
+>chr3 mapped via space-separated table row
+CCCC
+>chr1 the same name appearing twice
+NNNN
