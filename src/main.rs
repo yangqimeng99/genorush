@@ -27,6 +27,18 @@ struct Cli {
     #[arg(short = 'z', long, global = true)]
     gzip: bool,
 
+    /// Write BGZF rather than plain gzip, and compress whichever way the
+    /// output path is named.
+    ///
+    /// BGZF is gzip -- anything that reads `.gz` reads this -- but it is
+    /// gzip written so it can be indexed: bounded members that record their
+    /// own size, and an end-of-file block that proves the stream is whole.
+    /// `tabix`, `csi`, and every random-access reader need it. A `.vcf.gz`
+    /// written as ordinary gzip decompresses perfectly and cannot be
+    /// indexed, so the difference is worth asking for explicitly.
+    #[arg(short = 'b', long, global = true)]
+    bgzf: bool,
+
     #[command(subcommand)]
     command: TopCommand,
 }
@@ -66,7 +78,10 @@ fn main() -> std::process::ExitCode {
     }
     log::info!("using {} worker thread(s)", rayon::current_num_threads());
 
-    let opts = io_utils::OutputOpts { gzip: cli.gzip };
+    let opts = io_utils::OutputOpts {
+        gzip: cli.gzip,
+        bgzf: cli.bgzf,
+    };
 
     let result = match cli.command {
         TopCommand::Fastx(c) => fastx::run(c, opts),

@@ -7,6 +7,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`-b/--bgzf`**: writes BGZF rather than ordinary gzip, for any command and
+  any output. BGZF is gzip -- anything that reads `.gz` reads it -- but
+  written so it can be indexed: members bounded at 64 KiB that record their
+  own compressed size, and a final empty block proving the stream is whole.
+  Without it, `samtools faidx` on the same content answers *"Cannot index
+  files compressed with gzip, please use bgzip"*, and `tabix` says the same
+  about a `.vcf.gz`. A file that decompresses perfectly and cannot be indexed
+  is a quiet dead end, and the distinction is invisible without a flag for it.
+
+  Implemented over `noodles-bgzf`, whose writer takes its worker count from
+  the same `-j` budget as everything else, rather than hand-rolling the
+  framing: the EOF block and the per-member size field are exactly the
+  details that are easy to get subtly wrong and impossible to notice.
+  Verified against htslib on this machine -- `bgzip -t` passes and `samtools
+  faidx` indexes the output -- and structurally in the test suite, which has
+  no htslib to lean on. Costs about 0.14 MB of binary and five crates, most
+  of which (crossbeam, rayon) were already there.
+
 - **`fastx pair`**: matches up two mate files that have drifted out of sync,
   writing the pairs plus, optionally, each side's orphans. Quality control
   breaks pairing silently -- a read dropped from one mate file and kept in the

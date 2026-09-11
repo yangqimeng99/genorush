@@ -1,11 +1,13 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write};
+use std::num::NonZero;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use noodles_bgzf as bgzf;
 use rayon::prelude::*;
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -49,6 +51,19 @@ pub struct OutputOpts {
     /// Set by the global `--gzip` flag, which is the only way to ask for
     /// compressed output on stdout (`-o -` has no extension to inspect).
     pub gzip: bool,
+
+    /// Write BGZF instead of plain gzip, and compress whether or not the
+    /// path asked for it. Set by the global `--bgzf` flag.
+    ///
+    /// BGZF is gzip -- any reader that takes `.gz` takes this -- but it is
+    /// gzip constrained so that it can be indexed: every member holds at
+    /// most 64 KiB of uncompressed data and records its own compressed size,
+    /// and the stream ends with a distinguished empty block that proves it
+    /// was not truncated. That is what `tabix`, `csi`, and every random-access
+    /// reader in the ecosystem require. A `.vcf.gz` written as ordinary gzip
+    /// looks correct, decompresses correctly, and cannot be indexed -- which
+    /// is exactly the kind of quiet dead end worth a flag of its own.
+    pub bgzf: bool,
 }
 
 /// Opens `path` for reading, transparently decompressing gzip/bgzip input,
@@ -151,10 +166,13 @@ pub fn read_line_chunk(
 /// measurable next to the compression it wraps.
 pub enum BlockWriter {
     Gzip {
-        sink: BufWriter<Box<dyn Write>>,
+        sink: BufWriter<Box<dyn Write + Send>>,
         level: Compression,
     },
-    Plain(BufWriter<Box<dyn Write>>),
+    /// Held in an `Option` so that finishing -- which is what writes the EOF
+    /// block -- happens exactly once however many times `flush` is called.
+    Bgzf(Option<bgzf::io::MultithreadedWriter<BufWriter<Box<dyn Write + Send>>>>),
+    Plain(BufWriter<Box<dyn Write + Send>>),
 }
 
 /// Whether this write should be refused: gzip bytes aimed at a terminal.
@@ -176,12 +194,12 @@ fn is_binary_to_terminal(stdout_bound: bool, gzip: bool, stdout_is_tty: bool) ->
 /// the only way to ask for compressed output there. See `BlockWriter` for
 /// why this is not a plain `Write`.
 pub fn open_block_writer(path: &Path, opts: OutputOpts) -> Result<BlockWriter> {
-    let is_gz = opts.gzip
-        || path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("gz"))
-            .unwrap_or(false);
+    let named_gz = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+    let is_gz = opts.gzip || opts.bgzf || named_gz;
 
     if is_binary_to_terminal(is_stdio(path), is_gz, io::stdout().is_terminal()) {
         bail!(
@@ -190,7 +208,7 @@ pub fn open_block_writer(path: &Path, opts: OutputOpts) -> Result<BlockWriter> {
         );
     }
 
-    let sink: Box<dyn Write> = if is_stdio(path) {
+    let sink: Box<dyn Write + Send> = if is_stdio(path) {
         // `Stdout` wraps a `LineWriter`, but `write_blocks` hands it whole
         // blocks at a time, so that costs one newline scan per block rather
         // than a flush per line.
@@ -203,7 +221,16 @@ pub fn open_block_writer(path: &Path, opts: OutputOpts) -> Result<BlockWriter> {
     };
     let sink = BufWriter::with_capacity(IO_BUF, sink);
 
-    if is_gz {
+    if opts.bgzf {
+        // BGZF does its own framing -- 64 KiB members, each recording its
+        // compressed size -- so the blocks this writer is handed are just
+        // bytes to it. Its workers come from the same `-j` budget as
+        // everything else.
+        let workers = NonZero::new(rayon::current_num_threads()).unwrap_or(NonZero::<usize>::MIN);
+        Ok(BlockWriter::Bgzf(Some(
+            bgzf::io::MultithreadedWriter::with_worker_count(workers, sink),
+        )))
+    } else if is_gz {
         Ok(BlockWriter::Gzip {
             sink,
             level: Compression::default(),
@@ -236,6 +263,17 @@ impl BlockWriter {
                 }
                 Ok(())
             }
+            BlockWriter::Bgzf(writer) => {
+                let writer = writer
+                    .as_mut()
+                    .context("BGZF output was already finished")?;
+                for block in blocks {
+                    if !block.is_empty() {
+                        writer.write_all(&block)?;
+                    }
+                }
+                Ok(())
+            }
             BlockWriter::Plain(w) => {
                 for block in blocks {
                     if !block.is_empty() {
@@ -247,9 +285,20 @@ impl BlockWriter {
         }
     }
 
+    /// Finishes the output. For BGZF this is what appends the EOF block that
+    /// marks the stream complete, so it must happen before the process ends
+    /// -- a BGZF file without it reads fine until something checks, and then
+    /// reads as truncated.
     pub fn flush(&mut self) -> io::Result<()> {
         match self {
             BlockWriter::Gzip { sink, .. } => sink.flush(),
+            BlockWriter::Bgzf(writer) => match writer.take() {
+                Some(mut w) => {
+                    let mut sink = w.finish()?;
+                    sink.flush()
+                }
+                None => Ok(()),
+            },
             BlockWriter::Plain(w) => w.flush(),
         }
     }
@@ -338,9 +387,148 @@ mod tests {
     #[test]
     fn gzip_flag_compresses_regardless_of_extension() {
         let p = scratch("forced");
-        let (compressed, back) = round_trip(&p, OutputOpts { gzip: true }, b"ACGTACGTACGT\n");
+        let (compressed, back) = round_trip(
+            &p,
+            OutputOpts {
+                gzip: true,
+                bgzf: false,
+            },
+            b"ACGTACGTACGT\n",
+        );
         assert!(compressed, "--gzip must compress even without a .gz name");
         assert_eq!(back, b"ACGTACGTACGT\n");
+    }
+
+    /// The 28 bytes every BGZF stream ends with: an empty member that says
+    /// "this file is complete". A reader that does not find it knows the
+    /// file was truncated -- which is the whole reason it exists.
+    const BGZF_EOF: [u8; 28] = [
+        0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02,
+        0x00, 0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    fn looks_gzip(bytes: &[u8]) -> bool {
+        bytes.len() >= 2 && bytes[..2] == GZIP_MAGIC
+    }
+
+    fn write_with(path: &Path, opts: OutputOpts, payload: &[u8]) -> Vec<u8> {
+        let mut w = open_block_writer(path, opts).unwrap();
+        w.write_blocks(vec![payload.to_vec()]).unwrap();
+        w.flush().unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn bgzf_output_is_gzip_that_declares_its_block_sizes() {
+        let p = scratch("bgzf_shape");
+        let raw = write_with(
+            &p,
+            OutputOpts {
+                gzip: false,
+                bgzf: true,
+            },
+            b"ACGTACGTACGT\n",
+        );
+
+        assert!(looks_gzip(&raw), "BGZF is gzip");
+        // FEXTRA must be set, and the extra field must carry the `BC`
+        // subfield holding the member's own compressed size. Without it a
+        // reader cannot jump from member to member, which is the entire
+        // difference between this and ordinary gzip.
+        assert_eq!(raw[3] & 0x04, 0x04, "FEXTRA flag should be set");
+        assert_eq!(
+            &raw[12..14],
+            b"BC",
+            "the BC subfield should follow the header"
+        );
+    }
+
+    #[test]
+    fn bgzf_output_ends_with_the_marker_that_proves_it_is_complete() {
+        let p = scratch("bgzf_eof");
+        let raw = write_with(
+            &p,
+            OutputOpts {
+                gzip: false,
+                bgzf: true,
+            },
+            b"ACGT\n",
+        );
+        assert!(raw.len() > BGZF_EOF.len());
+        assert_eq!(
+            &raw[raw.len() - BGZF_EOF.len()..],
+            &BGZF_EOF,
+            "a BGZF stream without its EOF block reads as truncated"
+        );
+    }
+
+    #[test]
+    fn plain_gzip_output_has_no_bgzf_framing() {
+        // The contrast is the point: this file decompresses identically and
+        // cannot be indexed.
+        let p = scratch("plain_gz_shape").with_extension("gz");
+        let raw = write_with(&p, OutputOpts::default(), b"ACGT\n");
+        assert!(looks_gzip(&raw));
+        assert_ne!(raw[3] & 0x04, 0x04, "plain gzip sets no extra field here");
+        assert!(!raw.ends_with(&BGZF_EOF));
+    }
+
+    #[test]
+    fn bgzf_output_reads_back_through_the_ordinary_reader() {
+        let p = scratch("bgzf_roundtrip");
+        let payload: Vec<u8> = (0..200_000u32).map(|i| b"ACGT"[(i % 4) as usize]).collect();
+        write_with(
+            &p,
+            OutputOpts {
+                gzip: false,
+                bgzf: true,
+            },
+            &payload,
+        );
+
+        // Spanning many 64 KiB members: nothing downstream should need to
+        // know this was BGZF rather than gzip.
+        let mut back = Vec::new();
+        open_reader(&p).unwrap().read_to_end(&mut back).unwrap();
+        assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn bgzf_compresses_even_when_the_path_says_nothing() {
+        let p = scratch("bgzf_unnamed");
+        let raw = write_with(
+            &p,
+            OutputOpts {
+                gzip: false,
+                bgzf: true,
+            },
+            b"ACGT\n",
+        );
+        assert!(looks_gzip(&raw), "--bgzf implies compression");
+    }
+
+    #[test]
+    fn finishing_bgzf_twice_is_harmless() {
+        // Commands call flush at the end of their own paths; finishing twice
+        // must not append a second EOF block or fail.
+        let p = scratch("bgzf_double_finish");
+        let mut w = open_block_writer(
+            &p,
+            OutputOpts {
+                gzip: false,
+                bgzf: true,
+            },
+        )
+        .unwrap();
+        w.write_blocks(vec![b"ACGT\n".to_vec()]).unwrap();
+        w.flush().unwrap();
+        w.flush().unwrap();
+        let raw = std::fs::read(&p).unwrap();
+        assert_eq!(&raw[raw.len() - BGZF_EOF.len()..], &BGZF_EOF);
+        assert!(
+            !raw[..raw.len() - BGZF_EOF.len()].ends_with(&BGZF_EOF),
+            "the EOF block should appear once"
+        );
     }
 
     #[test]

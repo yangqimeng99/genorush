@@ -71,6 +71,27 @@ with two outputs (`fastx deinterleave`, and the paired-end modes of
 `sample`/`rescue`/`cat`) default only their first output to stdout; the
 second has to be a file, since two record streams cannot share one pipe.
 
+### BGZF
+
+`-b/--bgzf` writes BGZF instead of ordinary gzip:
+
+```bash
+genorush fastx rename genome.fa -n map.tsv -o genome.renamed.fa.gz --bgzf
+samtools faidx genome.renamed.fa.gz        # works
+```
+
+BGZF *is* gzip — anything that reads `.gz` reads this — but written so it can
+be indexed: bounded members that record their own compressed size, and a
+final empty block that proves the stream is whole. Without it, `samtools
+faidx` on the same content says *"Cannot index files compressed with gzip,
+please use bgzip"*, and `tabix` will say the same about a `.vcf.gz`. A file
+that decompresses perfectly and cannot be indexed is the kind of dead end
+worth its own flag.
+
+It costs a little: members are capped at 64 KiB, so compression is marginally
+worse than the large blocks `-z` uses. Take it when something downstream will
+want to seek.
+
 Compressed *input* needs no flag: gzip is recognised from the data itself,
 so a pipe carrying `.gz` bytes just works. Compressed *output* can't be
 inferred the same way — a pipe has no `.gz` extension to inspect — so

@@ -104,6 +104,76 @@ fn gzip_input_on_a_pipe_is_detected_and_z_compresses_the_way_out() {
     assert_eq!(gunzip(&piped.stdout), read(&out));
 }
 
+/// Every BGZF stream ends with this: an empty member saying the file is
+/// whole. Its absence is how a reader detects truncation, and its presence is
+/// what separates an indexable `.gz` from one that merely decompresses.
+const BGZF_EOF: [u8; 28] = [
+    0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02, 0x00,
+    0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+#[test]
+fn bgzf_output_is_indexable_gzip_with_the_same_contents() {
+    let dir = scratch("bgzf_flag");
+    let input = dir.join("genome.fa");
+    let map = dir.join("map.tsv");
+    let plain = dir.join("plain.fa");
+    let bgz = dir.join("indexed.fa.gz");
+    write(&input, &fasta(&["chr1", "chr2"]));
+    write(&map, b"1\tchr1\n2\tchr2\n");
+
+    assert_ok(&run(&[
+        "fastx",
+        "rename",
+        input.to_str().unwrap(),
+        "-n",
+        map.to_str().unwrap(),
+        "-o",
+        plain.to_str().unwrap(),
+    ]));
+    assert_ok(&run(&[
+        "fastx",
+        "rename",
+        input.to_str().unwrap(),
+        "-n",
+        map.to_str().unwrap(),
+        "-o",
+        bgz.to_str().unwrap(),
+        "--bgzf",
+    ]));
+
+    let raw = read(&bgz);
+    assert!(is_gzip(&raw), "BGZF is gzip");
+    assert_eq!(
+        raw[3] & 0x04,
+        0x04,
+        "the extra field flag carries the block size"
+    );
+    assert_eq!(&raw[12..14], b"BC", "BGZF's own subfield should be there");
+    assert_eq!(
+        &raw[raw.len() - BGZF_EOF.len()..],
+        &BGZF_EOF,
+        "without the EOF block the file reads as truncated"
+    );
+
+    // Same bytes either way: choosing BGZF is a framing decision, not a
+    // content one.
+    assert_eq!(gunzip(&raw), read(&plain));
+
+    // And the ordinary gzip path must not be quietly producing BGZF.
+    let plain_gz = dir.join("plain2.fa.gz");
+    assert_ok(&run(&[
+        "fastx",
+        "rename",
+        input.to_str().unwrap(),
+        "-n",
+        map.to_str().unwrap(),
+        "-o",
+        plain_gz.to_str().unwrap(),
+    ]));
+    assert!(!read(&plain_gz).ends_with(&BGZF_EOF));
+}
+
 #[test]
 fn gzip_flag_compresses_a_file_whose_name_does_not_end_in_gz() {
     let dir = scratch("forced_gzip_file");

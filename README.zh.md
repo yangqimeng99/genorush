@@ -68,6 +68,24 @@ cat genome.fa | genorush fastx rename - -n map.tsv -z > renamed.fa.gz
 （`fastx deinterleave`，以及 `sample`/`rescue`/`cat` 的双端模式）只有第一个
 输出默认走 stdout，第二个必须是文件——两股记录流不能共用一个管道。
 
+### BGZF
+
+`-b/--bgzf` 输出 BGZF 而不是普通 gzip：
+
+```bash
+genorush fastx rename genome.fa -n map.tsv -o genome.renamed.fa.gz --bgzf
+samtools faidx genome.renamed.fa.gz        # 可以建索引
+```
+
+BGZF **就是** gzip——任何能读 `.gz` 的工具都能读它——但它是按"可被索引"的方式
+写的：每个 member 有大小上限并记录自己的压缩长度，末尾还有一个空块证明这条流
+是完整的。没有它，同样的内容用 `samtools faidx` 会得到
+*"Cannot index files compressed with gzip, please use bgzip"*，`.vcf.gz` 用
+`tabix` 同理。一个能正常解压、却无法索引的文件，正是值得单独给一个参数的死角。
+
+代价是有一点：member 上限 64 KiB，所以压缩率比 `-z` 用的大块略差。当下游需要
+随机访问时再用它。
+
 压缩**输入**不需要任何参数：gzip 是从数据本身识别的，所以管道里流的是 `.gz`
 字节也能直接处理。压缩**输出**没法同样推断——管道没有 `.gz` 扩展名可看——所以
 用 `-z/--gzip` 来明确要求。写文件时行为完全不变：路径以 `.gz` 结尾照样会压缩。
